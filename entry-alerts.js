@@ -185,6 +185,7 @@ async function poll(cfg, ps, state) {
   saveState(state);
 }
 
+process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0); });
 (async () => {
   const cfg = loadConfig();
   const ps = providers(cfg);

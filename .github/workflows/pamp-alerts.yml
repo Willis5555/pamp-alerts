@@ -1,17 +1,19 @@
-# Posts PAMP entry alerts to Telegram from GitHub's own runners, so no machine of yours has
-# to stay on. Runs every 5 minutes (GitHub's minimum; it can drift to ~10 under load).
-# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the repo, as secrets or as variables; either works.
+# Keeps the PAMP alert bot running on GitHub's runners, so no machine of yours has to stay on.
+# Each run keeps the bot polling (every 15 s) for 5.5 hours, then starts the next run itself.
+# The half-hourly schedule is only a backstop in case a hand-off is ever missed.
+# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the repo, as secrets or as variables.
 name: PAMP entry alerts
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 concurrency:
   group: pamp-alerts
   cancel-in-progress: false
 jobs:
-  poll:
+  watch:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     permissions:
       contents: read
       actions: write
@@ -21,18 +23,17 @@ jobs:
         with:
           node-version: 20
       - run: npm ci --omit=dev
-      # The last block handled lives in the Actions cache between runs, so a run never
-      # re-posts what the previous one already did. Each run saves a fresh key; the next
-      # one restores the newest matching key.
+      # Where the previous run stopped, so nothing is posted twice and nothing is skipped.
       - uses: actions/cache/restore@v4
         with:
           path: state.json
           key: pamp-alerts-state-${{ github.run_id }}
           restore-keys: pamp-alerts-state-
-      - run: |
-          echo "state before run:"; cat state.json 2>/dev/null || echo "(none)"
-          node entry-alerts.js --once
-          echo "state after run:"; cat state.json
+      - name: watch the chain for 5.5 hours
+        run: |
+          echo "state before:"; cat state.json 2>/dev/null || echo "(none)"
+          timeout 330m node entry-alerts.js || true
+          echo "state after:"; cat state.json
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || vars.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || vars.TELEGRAM_CHAT_ID }}
@@ -41,3 +42,8 @@ jobs:
         with:
           path: state.json
           key: pamp-alerts-state-${{ github.run_id }}
+      - name: start the next shift
+        if: always()
+        run: gh workflow run pamp-alerts.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
