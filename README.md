@@ -34,9 +34,13 @@ chat. It remembers the last block it handled in `state.json`; a restart carries 
 
 ## Keeping it running
 
-On this machine it is already set up: a Task Scheduler job called **"PAMP entry alerts"**
-starts the bot hidden at logon and restarts it if it ever stops. Output goes to `alerts.log`
-in this folder.
+It runs from GitHub: the repo https://github.com/Willis5555/pamp-alerts has a workflow
+(`.github/workflows/pamp-alerts.yml`) that polls every 5 minutes with `--once`, using the
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` repository secrets. Nothing local needs to be on.
+Edit the bot there (or copy changes from this folder and push) and the next run uses them.
+
+A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine but is
+**disabled**, so the two never post twice. Enable it only if GitHub is turned off.
 
 - Check it: open Task Scheduler and look for "PAMP entry alerts", or run
   `schtasks /query /tn "PAMP entry alerts"`.
@@ -52,8 +56,11 @@ in this folder.
 |---|---|---|
 | `pollSeconds` | 15 | how often to look for new entries |
 | `minEntries` | 1 | ignore transactions with fewer entries than this |
-| `fuelMints` | true | also post a one-line "💧 12,345 $FUEL minted" for every transaction that mints $FUEL |
+| `fuelMints` | true | also post a one-line "⛽ 12,345 $FUEL minted" for every transaction that mints $FUEL |
 | `fuelMintMin` | 0 | only announce $FUEL mints of at least this many tokens |
+| `pampBuys` | true | also post a one-line "⛽ 12,345 $PAMP bought ≈ $12.34 · chart · tx" for every buy on the PAMP/WETH pool (sells are not posted) |
+| `pampBuyMinUsd` | 0 | only announce buys worth at least this many dollars |
+| `pampPair` | PAMP/WETH V3 pool | the pool watched for buys; `dexscreener` is the chart link in the message |
 | `dayOffset` | 1 | the dashboard shows the contract's day 2 as day 1; the bot says the same |
 | `rpc` | official + dRPC | endpoints, tried in order |
 | `auction` | v2 auction | the contract to watch |

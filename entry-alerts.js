@@ -35,6 +35,11 @@ const DEFAULTS = {
   fuelToken: "0xe60C1F5d9bA7f62a392a78472a3Ab83DD62467A3",
   fuelMints: true,        // also post a one-liner whenever $FUEL is minted
   fuelMintMin: 0,         // ...but only when a transaction mints at least this many $FUEL
+  // $PAMP buys: every swap on the PAMP/WETH Uniswap V3 pool where $PAMP leaves the pool.
+  pampPair: "0xC774A953079B7411F313A2d23ECAcAFb19682b6E",
+  pampBuys: true,
+  pampBuyMinUsd: 0,       // only announce buys worth at least this many dollars (0 = all)
+  dexscreener: "https://dexscreener.com/robinhood/0xc774a953079b7411f313a2d23ecacafb19682b6e",
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -51,6 +56,22 @@ const SCHEDULE_ABI = ["function emissionFor(uint256) view returns (uint256)"];
 const BURNER_ABI = ["event LegBurned(uint256 indexed leg, uint256 ethIn, uint256 moreBurned)"];
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 const ZERO_TOPIC = ethers.zeroPadValue("0x00", 32);
+const SWAP_IFACE = new ethers.Interface(["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"]);
+const SWAP_TOPIC = SWAP_IFACE.getEvent("Swap").topicHash;
+
+// $PAMP's dollar price from DexScreener, cached for a minute so a burst of buys costs one call.
+let priceCache = { at: 0, usd: null };
+async function pampUsd(cfg) {
+  if (Date.now() - priceCache.at < 60000) return priceCache.usd;
+  try {
+    const r = await fetch(`https://api.dexscreener.com/latest/dex/pairs/robinhood/${cfg.pampPair}`);
+    const j = await r.json();
+    const pair = j.pair || (j.pairs && j.pairs[0]);
+    priceCache = { at: Date.now(), usd: pair && pair.priceUsd ? Number(pair.priceUsd) : null };
+  } catch { priceCache = { at: Date.now(), usd: null }; }
+  return priceCache.usd;
+}
+const fmtUsd = v => v >= 100 ? "$" + nf(v, 0) : v >= 1 ? "$" + nf(v, 2) : "$" + Number(v).toLocaleString("en-US", { maximumSignificantDigits: 3 });
 
 // ---------------------------------------------------------------- config + state
 function loadConfig() {
@@ -167,6 +188,20 @@ async function poll(cfg, ps, state) {
         if (Number(ethers.formatEther(amount)) < cfg.fuelMintMin) continue;
         await send(cfg, `⛽ ${esc(fmtTok(amount))} $FUEL minted · [tx](${cfg.explorer}/tx/${tx})`);
         console.log(new Date().toISOString(), "posted fuel mint", fmtTok(amount), tx.slice(0, 12));
+      }
+    }
+    // $PAMP buys: one line per swap that takes $PAMP out of the pool. Sells stay quiet.
+    if (cfg.pampBuys && cfg.pampPair) {
+      const swaps = await withRpc(ps, p => p.getLogs({ address: cfg.pampPair, topics: [SWAP_TOPIC], fromBlock: from, toBlock: head }));
+      for (const lg of swaps) {
+        const sw = SWAP_IFACE.parseLog({ topics: [...lg.topics], data: lg.data });
+        const pampOut = -sw.args.amount1;             // token1 is $PAMP; negative = left the pool
+        if (pampOut <= 0n) continue;
+        const usd = await pampUsd(cfg);
+        const value = usd ? Number(ethers.formatEther(pampOut)) * usd : null;
+        if (value !== null && value < cfg.pampBuyMinUsd) continue;
+        await send(cfg, `⛽ *${esc(fmtTok(pampOut))} $PAMP* bought${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · [chart](${cfg.dexscreener}) · [tx](${cfg.explorer}/tx/${lg.transactionHash})`);
+        console.log(new Date().toISOString(), "posted pamp buy", fmtTok(pampOut), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
       }
     }
     state.lastBlock = head;
