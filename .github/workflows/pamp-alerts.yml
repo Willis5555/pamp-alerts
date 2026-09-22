@@ -29,7 +29,10 @@ jobs:
           path: state.json
           key: pamp-alerts-state-${{ github.run_id }}
           restore-keys: pamp-alerts-state-
-      - run: node entry-alerts.js --once
+      - run: |
+          echo "state before run:"; cat state.json 2>/dev/null || echo "(none)"
+          node entry-alerts.js --once
+          echo "state after run:"; cat state.json
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || vars.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || vars.TELEGRAM_CHAT_ID }}

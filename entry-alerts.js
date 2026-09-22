@@ -28,6 +28,7 @@ const DEFAULTS = {
   explorer: "https://robin.etherscan.io",
   dashboard: "https://willis5555.github.io/PAMP/",
   pollSeconds: 15,
+  lookbackBlocks: 6000,   // with no saved state, scan this far back (~10 min at ~10 blocks/s)
   // the page shows the contract's day 2 as day 1; the bot says the same numbers
   dayOffset: 1,
   minEntries: 1,          // ignore transactions with fewer entries than this
@@ -131,8 +132,11 @@ async function send(cfg, text) {
 async function poll(cfg, ps, state) {
   const iface = new ethers.Interface(ABI);
   const head = await withRpc(ps, p => p.getBlockNumber());
-  // first run: start at the head so an old backlog is not replayed into the chat
-  const from = state.lastBlock ? state.lastBlock + 1 : head;
+  // No saved state (first run, or a scheduled runner whose cache did not come back): look a
+  // little way back rather than starting at the head, so a run never silently skips what
+  // happened just before it. lookbackBlocks ~ 10 minutes on this chain.
+  const from = state.lastBlock ? state.lastBlock + 1 : Math.max(cfg.auctionDeployBlock, head - (cfg.lookbackBlocks || 0));
+  if (!state.lastBlock) console.log("no saved state: scanning from block", from, "to", head);
   if (from <= head) {
     const logs = await withRpc(ps, p => p.getLogs({ address: cfg.auction, topics: [iface.getEvent("Entered").topicHash], fromBlock: from, toBlock: head }));
     // one message per transaction, in order
