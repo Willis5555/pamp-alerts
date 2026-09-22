@@ -1,0 +1,4 @@
+config.json
+state.json
+node_modules/
+alerts.log

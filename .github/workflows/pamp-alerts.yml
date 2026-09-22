@@ -1,0 +1,40 @@
+# Posts PAMP entry alerts to Telegram from GitHub's own runners, so no machine of yours has
+# to stay on. Runs every 5 minutes (GitHub's minimum; it can drift to ~10 under load).
+# Secrets to set in the repo: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+name: PAMP entry alerts
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+concurrency:
+  group: pamp-alerts
+  cancel-in-progress: false
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --omit=dev
+      # The last block handled lives in the Actions cache between runs, so a run never
+      # re-posts what the previous one already did. Each run saves a fresh key; the next
+      # one restores the newest matching key.
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: pamp-alerts-state-${{ github.run_id }}
+          restore-keys: pamp-alerts-state-
+      - run: node entry-alerts.js --once
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: pamp-alerts-state-${{ github.run_id }}

@@ -1,0 +1,6 @@
+{
+  "telegramBotToken": "123456789:AAH-paste-the-token-from-BotFather",
+  "telegramChatId": "-1001234567890",
+  "pollSeconds": 15,
+  "minEntries": 1
+}

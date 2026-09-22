@@ -1,0 +1,14 @@
+{
+  "name": "pamp-entry-alerts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram alerts for every entry into the $PAMP daily auction on Robinhood Chain",
+  "main": "entry-alerts.js",
+  "scripts": {
+    "start": "node entry-alerts.js",
+    "dry": "node entry-alerts.js --dry-run --replay"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  }
+}
