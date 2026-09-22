@@ -47,6 +47,8 @@ const DEFAULTS = {
 const ABI = [
   "event Entered(address indexed buyer, uint256 indexed day, uint256 count, uint256 ethPaid, uint256 fuelBurned)",
   "function currentDay() view returns (uint256)",
+  "function totalFuelBurned() view returns (uint256)",
+  "function totalEthToMore() view returns (uint256)",
   "function dayEntries(uint256) view returns (uint256)",
   "function userEntries(uint256,address) view returns (uint256)",
   "function today() view returns (uint256 day, uint256 emission, uint256 entries, uint256 secondsLeft)",
@@ -54,6 +56,7 @@ const ABI = [
 ];
 const SCHEDULE_ABI = ["function emissionFor(uint256) view returns (uint256)"];
 const BURNER_ABI = ["event LegBurned(uint256 indexed leg, uint256 ethIn, uint256 moreBurned)"];
+const MORE_TOKEN = "0xc0F1A40512114b25cc1F30b5DF0bb48691405555";
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 const ZERO_TOPIC = ethers.zeroPadValue("0x00", 32);
 const SWAP_IFACE = new ethers.Interface(["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"]);
@@ -71,7 +74,6 @@ async function pampUsd(cfg) {
   } catch { priceCache = { at: Date.now(), usd: null }; }
   return priceCache.usd;
 }
-const fmtUsd = v => v >= 100 ? "$" + nf(v, 0) : v >= 1 ? "$" + nf(v, 2) : "$" + Number(v).toLocaleString("en-US", { maximumSignificantDigits: 3 });
 
 // ---------------------------------------------------------------- config + state
 function loadConfig() {
@@ -109,6 +111,7 @@ const nf = (n, d = 0) => Number(n).toLocaleString("en-US", { maximumFractionDigi
 const short = a => a.slice(0, 6) + "…" + a.slice(-4);
 const fmtEth = wei => nf(Number(ethers.formatEther(wei)), 5) + " ETH";
 const fmtTok = (wei, d = 0) => nf(Number(ethers.formatEther(wei)), d);
+const fmtUsd = v => v >= 100 ? "$" + nf(v, 0) : v >= 1 ? "$" + nf(v, 2) : "$" + Number(v).toLocaleString("en-US", { maximumSignificantDigits: 3 });
 const esc = s => String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, m => "\\" + m); // MarkdownV2
 const hms = secs => { secs = Math.max(0, secs); const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60); return `${h}h ${String(m).padStart(2, "0")}m`; };
 
@@ -138,12 +141,93 @@ function rolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
   ].join("\n");
 }
 
+// ---------------------------------------------------------------- /burn
+// Dollar prices for $FUEL and $MORE from DexScreener (deepest pair per token), cached a minute.
+let tokenPriceCache = { at: 0, usd: {} };
+async function tokenUsd(cfg) {
+  if (Date.now() - tokenPriceCache.at < 60000) return tokenPriceCache.usd;
+  const usd = {};
+  try {
+    const j = await (await fetch(`https://api.dexscreener.com/tokens/v1/robinhood/${cfg.fuelToken},${MORE_TOKEN}`)).json();
+    const best = {};
+    for (const pr of Array.isArray(j) ? j : []) {
+      const k = pr.baseToken.address.toLowerCase(), liq = pr.liquidity && pr.liquidity.usd || 0;
+      if (!best[k] || liq > best[k].liq) best[k] = { liq, usd: Number(pr.priceUsd) };
+    }
+    for (const k of Object.keys(best)) usd[k] = best[k].usd;
+  } catch {}
+  tokenPriceCache = { at: Date.now(), usd };
+  return usd;
+}
+// What the $PAMP protocol has burned: $FUEL from the auction's own counter; $MORE by summing
+// the burner's LegBurned events in transactions that also carry a v2 Entered event (the burner
+// is shared with v1, so its own total would overcount). Cached for five minutes.
+let burnCache = { at: 0, v: null };
+async function burnTotals(cfg, ps) {
+  if (burnCache.v && Date.now() - burnCache.at < 300000) return burnCache.v;
+  const iface = new ethers.Interface(ABI), bi = new ethers.Interface(BURNER_ABI);
+  const a = new ethers.Contract(cfg.auction, ABI, ps[0]);
+  const head = await withRpc(ps, p => p.getBlockNumber());
+  const [fuel, ethToMore] = await withRpc(ps, async p => Promise.all([a.connect(p).totalFuelBurned(), a.connect(p).totalEthToMore()]));
+  let more = null;
+  try {
+    const [entered, legs] = await withRpc(ps, async p => Promise.all([
+      p.getLogs({ address: cfg.auction, topics: [iface.getEvent("Entered").topicHash], fromBlock: cfg.auctionDeployBlock, toBlock: head }),
+      p.getLogs({ address: cfg.burner, topics: [bi.getEvent("LegBurned").topicHash], fromBlock: cfg.auctionDeployBlock, toBlock: head })
+    ]));
+    const txs = new Set(entered.map(l => l.transactionHash));
+    more = legs.filter(l => txs.has(l.transactionHash)).reduce((sum, l) => sum + bi.parseLog({ topics: [...l.topics], data: l.data }).args.moreBurned, 0n);
+  } catch (e) { console.error("burn scan failed:", e.message || e); }
+  burnCache = { at: Date.now(), v: { fuel, more, ethToMore } };
+  return burnCache.v;
+}
+async function burnMessage(cfg, ps) {
+  const t = await burnTotals(cfg, ps), usd = await tokenUsd(cfg);
+  const fUsd = usd[cfg.fuelToken.toLowerCase()], mUsd = usd[MORE_TOKEN.toLowerCase()];
+  const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
+  return [
+    `🔥 *Burned by the $PAMP protocol*`,
+    `⛽ *${esc(fmtTok(t.fuel))} $FUEL*${val(t.fuel, fUsd)}`,
+    t.more !== null ? `🔥 *${esc(fmtTok(t.more))} $MORE*${val(t.more, mUsd)} · bought with ${esc(fmtEth(t.ethToMore))}` : `🔥 $MORE: ${esc(fmtEth(t.ethToMore))} sent to the burner \\(count unavailable right now\\)`,
+    `Every entry burns $FUEL and buys and burns $MORE\\. [Stats](${cfg.dashboard}#stats)`
+  ].join("\n");
+}
+// Commands people type in the chat. Only /burn for now. Telegram hands us each message once
+// (the offset is saved in state), so a restart never answers twice.
+async function handleCommands(cfg, ps, state) {
+  if (DRY || !cfg.telegramBotToken) return;
+  const r = await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/getUpdates`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ offset: state.updateOffset || 0, timeout: 0, allowed_updates: ["message"] })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) throw new Error("telegram getUpdates: " + (j.description || r.status));
+  for (const u of j.result) {
+    state.updateOffset = u.update_id + 1;
+    const m = u.message, text = m && m.text || "";
+    if (!/^\/burn(@\w+)?(\s|$)/i.test(text)) continue;
+    try {
+      await send(cfg, await burnMessage(cfg, ps), { chatId: m.chat.id, replyTo: m.message_id });
+      console.log(new Date().toISOString(), "answered /burn in chat", m.chat.id);
+    } catch (e) { console.error("answering /burn failed:", e.message || e); }
+  }
+  if (j.result.length) saveState(state);
+}
+async function registerCommands(cfg) {
+  if (DRY || !cfg.telegramBotToken) return;
+  await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/setMyCommands`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commands: [{ command: "burn", description: "$FUEL and $MORE burned by the $PAMP protocol" }] })
+  }).catch(() => {});
+}
+
 // ---------------------------------------------------------------- telegram
-async function send(cfg, text) {
+async function send(cfg, text, { chatId, replyTo } = {}) {
   if (DRY) { console.log("\n--- would post ---\n" + text + "\n"); return; }
   const r = await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/sendMessage`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: cfg.telegramChatId, text, parse_mode: "MarkdownV2", disable_web_page_preview: true })
+    body: JSON.stringify({ chat_id: chatId ?? cfg.telegramChatId, text, parse_mode: "MarkdownV2", disable_web_page_preview: true,
+                           ...(replyTo ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : {}) })
   });
   const j = await r.json().catch(() => ({}));
   if (!j.ok) throw new Error("telegram: " + (j.description || r.status));
@@ -232,10 +316,19 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     await send(cfg, "🧪 *Test alert* — this is what an entry looks like:\n\n" + entryMessage(cfg, sample, { dayEntries: 42n, emission: 255739n * 10n ** 18n, secondsLeft: 79620 }));
     console.log("test alert sent"); return;
   }
+  if (process.argv.includes("--burn-test")) {
+    const text = await burnMessage(cfg, ps);
+    await send(cfg, "🧪 *Test — what /burn answers:*\n\n" + text);
+    if (!DRY) console.log("burn test sent");
+    return;
+  }
   console.log(`PAMP entry alerts ${DRY ? "(dry run) " : ""}watching ${cfg.auction} every ${cfg.pollSeconds}s`);
+  await registerCommands(cfg);
   for (;;) {
     try { await poll(cfg, ps, state); }
     catch (e) { console.error(new Date().toISOString(), "poll failed:", e.message || e); }
+    try { await handleCommands(cfg, ps, state); }
+    catch (e) { console.error(new Date().toISOString(), "commands failed:", e.message || e); }
     if (ONCE || (DRY && process.argv.includes("--replay"))) break;
     await new Promise(r => setTimeout(r, cfg.pollSeconds * 1000));
   }

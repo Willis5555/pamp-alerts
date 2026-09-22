@@ -50,6 +50,12 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
   `npx pm2 start entry-alerts.js --name pamp-alerts && npx pm2 save`, or a cron entry that runs
   `node entry-alerts.js --once` every minute. Only run one copy at a time, or entries post twice.
 
+## Chat commands
+
+- `/burn` — replies with the $FUEL and $MORE burned by the $PAMP protocol so far, with dollar
+  values. Works in the group and in a direct message to the bot. To see the wording without
+  waiting for someone to ask: `node entry-alerts.js --burn-test` posts the answer to the group.
+
 ## Options (config.json)
 
 | Key | Default | Meaning |
