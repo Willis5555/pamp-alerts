@@ -19,7 +19,7 @@ const esc = s => String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, m => "\\" + m);
   const amount = logs.filter(l => l.transactionHash === tx).reduce((a, l) => a + BigInt(l.data), 0n);
   const blk = await p.getBlock(last.blockNumber);
   const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
-  const text = `🧪 *Test — last $FUEL mint* \\(${esc(ago + " min ago")}\\):\n⛽ ${esc(nf(ethers.formatEther(amount)))} $FUEL minted · [tx](https://robin.etherscan.io/tx/${tx})`;
+  const text = `🧪 *Test — last $FUEL claim* \\(${esc(ago + " min ago")}\\):\n⛽ ${esc(nf(ethers.formatEther(amount)))} $FUEL claimed · [tx](https://robin.etherscan.io/tx/${tx})`;
   const r = await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/sendMessage`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: cfg.telegramChatId, text, parse_mode: "MarkdownV2", disable_web_page_preview: true })

@@ -56,9 +56,9 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 |---|---|---|
 | `pollSeconds` | 15 | how often to look for new entries |
 | `minEntries` | 1 | ignore transactions with fewer entries than this |
-| `fuelMints` | true | also post a one-line "⛽ 12,345 $FUEL minted" for every transaction that mints $FUEL |
+| `fuelMints` | true | also post a one-line "⛽ 12,345 $FUEL claimed" for every transaction that mints $FUEL |
 | `fuelMintMin` | 0 | only announce $FUEL mints of at least this many tokens |
-| `pampBuys` | true | also post a one-line "⛽ 12,345 $PAMP bought ≈ $12.34 · chart · tx" for every buy on the PAMP/WETH pool (sells are not posted) |
+| `pampBuys` | true | also post a one-line "🟢 12,345 $PAMP bought ≈ $12.34 · chart · tx" for every buy on the PAMP/WETH pool (sells are not posted) |
 | `pampBuyMinUsd` | 0 | only announce buys worth at least this many dollars |
 | `pampPair` | PAMP/WETH V3 pool | the pool watched for buys; `dexscreener` is the chart link in the message |
 | `dayOffset` | 1 | the dashboard shows the contract's day 2 as day 1; the bot says the same |

@@ -26,7 +26,7 @@ const iface = new ethers.Interface(["event Swap(address indexed sender, address 
   const value = usd ? Number(ethers.formatEther(pampOut)) * usd : null;
   const blk = await p.getBlock(last.blockNumber);
   const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
-  const text = `🧪 *Test — last $PAMP buy* \\(${esc(ago + " min ago")}\\):\n⛽ *${esc(nf(ethers.formatEther(pampOut)))} $PAMP* bought${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · [chart](${CHART}) · [tx](https://robin.etherscan.io/tx/${tx})`;
+  const text = `🧪 *Test — last $PAMP buy* \\(${esc(ago + " min ago")}\\):\n🟢 *${esc(nf(ethers.formatEther(pampOut)))} $PAMP* bought${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · [chart](${CHART}) · [tx](https://robin.etherscan.io/tx/${tx})`;
   const r = await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/sendMessage`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: cfg.telegramChatId, text, parse_mode: "MarkdownV2", disable_web_page_preview: true })

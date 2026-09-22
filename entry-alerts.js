@@ -186,8 +186,8 @@ async function poll(cfg, ps, state) {
       for (const lg of mints) byTx.set(lg.transactionHash, (byTx.get(lg.transactionHash) || 0n) + BigInt(lg.data));
       for (const [tx, amount] of byTx) {
         if (Number(ethers.formatEther(amount)) < cfg.fuelMintMin) continue;
-        await send(cfg, `⛽ ${esc(fmtTok(amount))} $FUEL minted · [tx](${cfg.explorer}/tx/${tx})`);
-        console.log(new Date().toISOString(), "posted fuel mint", fmtTok(amount), tx.slice(0, 12));
+        await send(cfg, `⛽ ${esc(fmtTok(amount))} $FUEL claimed · [tx](${cfg.explorer}/tx/${tx})`);
+        console.log(new Date().toISOString(), "posted fuel claim", fmtTok(amount), tx.slice(0, 12));
       }
     }
     // $PAMP buys: one line per swap that takes $PAMP out of the pool. Sells stay quiet.
@@ -200,7 +200,7 @@ async function poll(cfg, ps, state) {
         const usd = await pampUsd(cfg);
         const value = usd ? Number(ethers.formatEther(pampOut)) * usd : null;
         if (value !== null && value < cfg.pampBuyMinUsd) continue;
-        await send(cfg, `⛽ *${esc(fmtTok(pampOut))} $PAMP* bought${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · [chart](${cfg.dexscreener}) · [tx](${cfg.explorer}/tx/${lg.transactionHash})`);
+        await send(cfg, `🟢 *${esc(fmtTok(pampOut))} $PAMP* bought${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · [chart](${cfg.dexscreener}) · [tx](${cfg.explorer}/tx/${lg.transactionHash})`);
         console.log(new Date().toISOString(), "posted pamp buy", fmtTok(pampOut), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
       }
     }
