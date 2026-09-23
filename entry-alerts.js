@@ -48,6 +48,7 @@ const ABI = [
   "event Entered(address indexed buyer, uint256 indexed day, uint256 count, uint256 ethPaid, uint256 fuelBurned)",
   "function currentDay() view returns (uint256)",
   "function totalFuelBurned() view returns (uint256)",
+  "function totalEntries() view returns (uint256)",
   "function totalEthToMore() view returns (uint256)",
   "function dayEntries(uint256) view returns (uint256)",
   "function userEntries(uint256,address) view returns (uint256)",
@@ -119,8 +120,9 @@ const hms = secs => { secs = Math.max(0, secs); const h = Math.floor(secs / 3600
 function entryMessage(cfg, ev, ctx) {
   const shown = Number(ev.day) - cfg.dayOffset;
   const dayLabel = shown >= 1 ? `Day ${shown}` : "Pre\\-launch day";
-  const share = ctx.dayEntries > 0n ? Number((ev.count * 10000n) / ctx.dayEntries) / 100 : 100;
-  const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * ev.count) / ctx.dayEntries : null;
+  const mine = ctx.userEntries && ctx.userEntries > ev.count ? ctx.userEntries : ev.count;   // the wallet's whole day
+  const share = ctx.dayEntries > 0n ? Number((mine * 10000n) / ctx.dayEntries) / 100 : 100;
+  const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * mine) / ctx.dayEntries : null;
   const usd = ctx.usd || {};
   const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
   // every entry is worth 0.0001 ETH: what was sent plus the $FUEL it took
@@ -132,7 +134,8 @@ function entryMessage(cfg, ev, ctx) {
     `⛽ *${esc(fmtTok(ev.fuelBurned))} $FUEL* burned${val(ev.fuelBurned, usd.fuel)}`,
     `🟢 *${esc(fmtTok(ev.moreBurned ?? 0n))} $MORE* burned${val(ev.moreBurned ?? 0n, usd.more)}`,
     ``,
-    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries · this wallet *${esc(Math.round(share))}% of the lobby*`,
+    `🧮 This wallet: *${esc(nf(mine))}* ${mine === 1n ? "entry" : "entries"} this cycle · *${esc(Math.round(share))}% of the lobby*`,
+    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries`,
   ];
   if (est) lines.push(`🎁 If the day closed now: *≈ ${esc(fmtTok(est, 0))} $PAMP*${val(est, usd.pamp)}`);
   if (ctx.secondsLeft != null) lines.push(`⏳ Day closes in *${esc(hms(ctx.secondsLeft))}*`);
@@ -151,6 +154,28 @@ function rolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
     `${esc(nf(closedEntries))} entries · ${esc(fmtTok(emission))} $PAMP to claim · ${closedEntries > 0n ? esc(fmtTok(per, 2)) + " $PAMP per entry" : "nobody entered, nothing minted"}`,
     `*Day ${esc(n)} is open\\.* [Enter](${cfg.dashboard})`
   ].join("\n");
+}
+
+// One Entered log → the entry plus everything the message needs, read from the chain.
+async function describeEntry(cfg, ps, lg) {
+  const iface = new ethers.Interface(ABI);
+  const ev = iface.parseLog({ topics: [...lg.topics], data: lg.data });
+  const e = { buyer: ev.args.buyer, day: ev.args.day, count: ev.args.count, ethPaid: ev.args.ethPaid, fuelBurned: ev.args.fuelBurned, tx: lg.transactionHash };
+  if (e.count < BigInt(cfg.minEntries)) return null;
+  // the $MORE burned by this same transaction: the burner's LegBurned events in its receipt
+  try {
+    const rc = await withRpc(ps, p => p.getTransactionReceipt(lg.transactionHash));
+    const bi = new ethers.Interface(BURNER_ABI), topic = bi.getEvent("LegBurned").topicHash;
+    e.moreBurned = rc.logs.filter(x => x.address.toLowerCase() === cfg.burner.toLowerCase() && x.topics[0] === topic)
+      .reduce((sum, x) => sum + bi.parseLog({ topics: [...x.topics], data: x.data }).args.moreBurned, 0n);
+  } catch { e.moreBurned = null; }
+  const a = new ethers.Contract(cfg.auction, ABI, ps[0]);
+  // The wallet's total for the day (all its transactions, this one included) is what its
+  // share and its projected $PAMP are based on, not just the entries in this transaction.
+  const [t, dayEntries, userEntries, totalEntries] = await withRpc(ps, async p => Promise.all([a.connect(p).today(), a.connect(p).dayEntries(e.day), a.connect(p).userEntries(e.day, e.buyer), a.connect(p).totalEntries()]));
+  const ctx = { dayEntries, userEntries, totalEntries, emission: t.day === e.day ? t.emission : null, secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
+  ctx.usd = await entryPrices(cfg).catch(() => ({}));
+  return { e, ctx };
 }
 
 // ---------------------------------------------------------------- /burn
@@ -261,22 +286,10 @@ async function poll(cfg, ps, state) {
     const logs = await withRpc(ps, p => p.getLogs({ address: cfg.auction, topics: [iface.getEvent("Entered").topicHash], fromBlock: from, toBlock: head }));
     // one message per transaction, in order
     for (const lg of logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index)) {
-      const ev = iface.parseLog({ topics: [...lg.topics], data: lg.data });
-      const e = { buyer: ev.args.buyer, day: ev.args.day, count: ev.args.count, ethPaid: ev.args.ethPaid, fuelBurned: ev.args.fuelBurned, tx: lg.transactionHash };
-      if (e.count < BigInt(cfg.minEntries)) continue;
-      // the $MORE burned by this same transaction: the burner's LegBurned events in its receipt
-      try {
-        const rc = await withRpc(ps, p => p.getTransactionReceipt(lg.transactionHash));
-        const bi = new ethers.Interface(BURNER_ABI), topic = bi.getEvent("LegBurned").topicHash;
-        e.moreBurned = rc.logs.filter(x => x.address.toLowerCase() === cfg.burner.toLowerCase() && x.topics[0] === topic)
-          .reduce((sum, x) => sum + bi.parseLog({ topics: [...x.topics], data: x.data }).args.moreBurned, 0n);
-      } catch { e.moreBurned = null; }
-      const a = new ethers.Contract(cfg.auction, ABI, ps[0]);
-      const [t, dayEntries] = await withRpc(ps, async p => Promise.all([a.connect(p).today(), a.connect(p).dayEntries(e.day)]));
-      const ctx = { dayEntries, emission: t.day === e.day ? t.emission : null, secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
-      ctx.usd = await entryPrices(cfg).catch(() => ({}));
-      await send(cfg, entryMessage(cfg, e, ctx));
-      console.log(new Date().toISOString(), "posted entry", short(e.buyer), String(e.count), "day", String(e.day));
+      const built = await describeEntry(cfg, ps, lg);
+      if (!built) continue;
+      await send(cfg, entryMessage(cfg, built.e, built.ctx));
+      console.log(new Date().toISOString(), "posted entry", short(built.e.buyer), String(built.e.count), "day", String(built.e.day));
     }
     // $FUEL minted: every Transfer from the zero address on the FUEL token, one line per
     // transaction (a batch claim mints to several addresses at once), amount only.
@@ -328,9 +341,21 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
   if (DRY && process.argv.includes("--replay")) state.lastBlock = cfg.auctionDeployBlock - 1;  // dry-run over the whole history
   if (process.argv.includes("--test")) {
     // one sample alert through the real formatter, so the chat and the markup are proven
-    const sample = { buyer: "0xB4b28BF331b721a6B99D3DbD58DF5A9907d4DCAa", day: 2n, count: 35n, ethPaid: 21n * 10n ** 14n, fuelBurned: 561870n * 10n ** 18n, moreBurned: 53201n * 10n ** 18n, tx: "0x5b7f31bdfafe17ae60c7370d89ef78913e6bfe008a728f908862d22ad71dc496" };
-    await send(cfg, "🧪 *Test alert* — this is what an entry looks like:\n\n" + entryMessage(cfg, sample, { dayEntries: 42n, emission: 255739n * 10n ** 18n, secondsLeft: 79620, usd: await entryPrices(cfg).catch(() => ({})) }));
+    const sample = { buyer: "0xB4b28BF331b721a6B99D3DbD58DF5A9907d4DCAa", day: 2n, count: 50n, ethPaid: 30n * 10n ** 14n, fuelBurned: 561870n * 10n ** 18n, moreBurned: 53201n * 10n ** 18n, tx: "0x5b7f31bdfafe17ae60c7370d89ef78913e6bfe008a728f908862d22ad71dc496" };
+    await send(cfg, "🧪 *Test alert* — this is what an entry looks like:\n\n" + entryMessage(cfg, sample, { dayEntries: 177n, userEntries: 85n, totalEntries: 1065n, emission: 255739n * 10n ** 18n, secondsLeft: 79620, usd: await entryPrices(cfg).catch(() => ({})) }));
     console.log("test alert sent"); return;
+  }
+  if (process.argv.includes("--test-last")) {
+    // the most recent real entry, through the real formatter
+    const iface = new ethers.Interface(ABI);
+    const head = await withRpc(ps, p => p.getBlockNumber());
+    const logs = await withRpc(ps, p => p.getLogs({ address: cfg.auction, topics: [iface.getEvent("Entered").topicHash], fromBlock: Math.max(cfg.auctionDeployBlock, head - 400000), toBlock: head }));
+    if (!logs.length) { console.log("no entry found recently"); return; }
+    const built = await describeEntry({ ...cfg, minEntries: 0 }, ps, logs[logs.length - 1]);
+    const blk = await withRpc(ps, p => p.getBlock(logs[logs.length - 1].blockNumber));
+    const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
+    await send(cfg, "🧪 *Test — last entry* " + esc(`(${ago} min ago)`) + ":\n\n" + entryMessage(cfg, built.e, built.ctx));
+    console.log("last entry test sent:", built.e.tx); return;
   }
   if (process.argv.includes("--burn-test")) {
     const text = await burnMessage(cfg, ps);
