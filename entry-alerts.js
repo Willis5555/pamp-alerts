@@ -45,6 +45,10 @@ const DEFAULTS = {
   fuelBuys: true,
   fuelBuyMinUsd: 25,
   fuelDexscreener: "https://dexscreener.com/robinhood/0xff40c99525ffa6b6cf79ecbe370ef7c887d68f69",
+  // $PAMP stakes: every Staked event on the staking contract.
+  staking: "0x6ebf3eAfc1fD08a1E51Ec3a7f7D254BAE1a9370E",
+  stakeAlerts: true,
+  stakeMinUsd: 0,         // only announce stakes worth at least this many dollars (0 = all)
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -68,6 +72,20 @@ const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 const ZERO_TOPIC = ethers.zeroPadValue("0x00", 32);
 const SWAP_IFACE = new ethers.Interface(["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"]);
 const SWAP_TOPIC = SWAP_IFACE.getEvent("Swap").topicHash;
+const STAKE_IFACE = new ethers.Interface(["event Staked(uint256 indexed stakeId, address indexed staker, uint256 amount, uint256 duration)"]);
+const STAKE_TOPIC = STAKE_IFACE.getEvent("Staked").topicHash;
+const fmtDate = ts => new Date(ts * 1000).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+
+function stakeMessage(cfg, st, usd) {
+  const days = Math.round(st.duration / 86400);
+  const value = usd ? Number(ethers.formatEther(st.amount)) * usd : null;
+  return `🔒 *${esc(fmtTok(st.amount))} $PAMP* staked${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · *${esc(nf(days))} days* · unlocks ${esc(fmtDate(st.unlockAt))} · [wallet](${cfg.explorer}/address/${st.staker}) · [tx](${cfg.explorer}/tx/${st.tx})`;
+}
+function parseStake(lg, blockTs) {
+  const a = STAKE_IFACE.parseLog({ topics: [...lg.topics], data: lg.data }).args;
+  const duration = Number(a.duration);
+  return { id: a.stakeId, staker: a.staker, amount: a.amount, duration, unlockAt: blockTs + duration, tx: lg.transactionHash, block: lg.blockNumber };
+}
 
 
 // ---------------------------------------------------------------- config + state
@@ -358,6 +376,19 @@ async function poll(cfg, ps, state) {
         console.log(new Date().toISOString(), "posted buy", pool.sym, fmtTok(out), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
       }
     }
+    // $PAMP stakes: one line per stake opened.
+    if (cfg.stakeAlerts && cfg.staking) {
+      const logs = await withRpc(ps, p => p.getLogs({ address: cfg.staking, topics: [STAKE_TOPIC], fromBlock: from, toBlock: head }));
+      for (const lg of logs) {
+        const blk = await withRpc(ps, p => p.getBlock(lg.blockNumber));
+        const st = parseStake(lg, Number(blk.timestamp));
+        const usd = (await tokenUsd(cfg))[PAMP_TOKEN.toLowerCase()];
+        const value = usd ? Number(ethers.formatEther(st.amount)) * usd : null;
+        if (cfg.stakeMinUsd > 0 && (value === null || value < cfg.stakeMinUsd)) continue;
+        await send(cfg, stakeMessage(cfg, st, usd));
+        console.log(new Date().toISOString(), "posted stake", fmtTok(st.amount), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
+      }
+    }
     state.lastBlock = head;
   }
   // rollover: the contract's day moved on since the last poll
@@ -397,6 +428,19 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
     await send(cfg, "🧪 *Test — last entry* " + esc(`(${ago} min ago)`) + ":\n\n" + entryMessage(cfg, built.e, built.ctx));
     console.log("last entry test sent:", built.e.tx); return;
+  }
+  if (process.argv.includes("--test-last-stake")) {
+    const head = await withRpc(ps, p => p.getBlockNumber());
+    const logs = await withRpc(ps, p => p.getLogs({ address: cfg.staking, topics: [STAKE_TOPIC], fromBlock: Math.max(cfg.auctionDeployBlock, head - 400000), toBlock: head }));
+    if (!logs.length) { console.log("no stake found recently"); return; }
+    const lg = logs[logs.length - 1];
+    const blk = await withRpc(ps, p => p.getBlock(lg.blockNumber));
+    const st = parseStake(lg, Number(blk.timestamp));
+    const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
+    const usd = (await tokenUsd(cfg))[PAMP_TOKEN.toLowerCase()];
+    await send(cfg, "🧪 *Test — last stake* " + esc(`(${ago} min ago)`) + ":\n" + stakeMessage(cfg, st, usd));
+    if (!DRY) console.log("last stake test sent:", st.tx);
+    return;
   }
   if (process.argv.includes("--contract-test")) {
     await send(cfg, "🧪 *Test — what /contract answers:*\n\n" + contractMessage(cfg));
