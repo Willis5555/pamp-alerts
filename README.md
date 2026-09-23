@@ -60,6 +60,10 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
   that contains the word "website" gets the same reply, at most once a minute per chat.
   `node entry-alerts.js --website-test` posts the answer to the group.
 
+- `/contract` — replies with the $PAMP token address as a tap-to-copy code span plus explorer,
+  chart and dashboard links. Any message that contains the word "contract" gets the same reply,
+  at most once a minute per chat. `node entry-alerts.js --contract-test` posts the answer.
+
 ## Options (config.json)
 
 | Key | Default | Meaning |

@@ -398,6 +398,11 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     await send(cfg, "🧪 *Test — last entry* " + esc(`(${ago} min ago)`) + ":\n\n" + entryMessage(cfg, built.e, built.ctx));
     console.log("last entry test sent:", built.e.tx); return;
   }
+  if (process.argv.includes("--contract-test")) {
+    await send(cfg, "🧪 *Test — what /contract answers:*\n\n" + contractMessage(cfg));
+    if (!DRY) console.log("contract test sent");
+    return;
+  }
   if (process.argv.includes("--website-test")) {
     await send(cfg, "🧪 *Test — what /website answers:*\n\n" + websiteMessage());
     if (!DRY) console.log("website test sent");
