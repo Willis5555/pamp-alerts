@@ -33,7 +33,7 @@ const DEFAULTS = {
   dayOffset: 1,
   minEntries: 1,          // ignore transactions with fewer entries than this
   fuelToken: "0xe60C1F5d9bA7f62a392a78472a3Ab83DD62467A3",
-  fuelMints: true,        // also post a one-liner whenever $FUEL is minted
+  fuelMints: false,       // set true to also post a one-liner whenever $FUEL is claimed
   fuelMintMin: 5000000,   // ...but only when a transaction claims at least this many $FUEL
   // $PAMP buys: every swap on the PAMP/WETH Uniswap V3 pool where $PAMP leaves the pool.
   pampPair: "0xC774A953079B7411F313A2d23ECAcAFb19682b6E",

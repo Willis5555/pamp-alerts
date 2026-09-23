@@ -70,7 +70,7 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 |---|---|---|
 | `pollSeconds` | 15 | how often to look for new entries |
 | `minEntries` | 1 | ignore transactions with fewer entries than this |
-| `fuelMints` | true | also post a one-line "⛽ 12,345 $FUEL claimed" for every transaction that mints $FUEL |
+| `fuelMints` | false | set true to also post a one-line "⛽ 12,345 $FUEL claimed" for every transaction that mints $FUEL |
 | `fuelMintMin` | 5,000,000 | only announce $FUEL claims of at least this many tokens |
 | `pampBuys` | true | also post a one-line "🟢 12,345 $PAMP bought ≈ $12.34 · chart · tx" for every buy on the PAMP/WETH pool (sells are not posted) |
 | `pampBuyMinUsd` | 4 | only announce $PAMP buys worth at least this many dollars |
