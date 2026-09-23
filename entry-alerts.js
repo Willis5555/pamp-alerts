@@ -43,7 +43,7 @@ const DEFAULTS = {
   // $FUEL buys: every swap on the FUEL/WETH Uniswap V3 pool where $FUEL leaves the pool.
   fuelPair: "0xFF40c99525ffA6b6cf79ecbE370eF7C887D68F69",
   fuelBuys: true,
-  fuelBuyMinUsd: 5,
+  fuelBuyMinUsd: 25,
   fuelDexscreener: "https://dexscreener.com/robinhood/0xff40c99525ffa6b6cf79ecbe370ef7c887d68f69",
   telegramBotToken: "",
   telegramChatId: ""
@@ -238,22 +238,45 @@ async function handleCommands(cfg, ps, state) {
   for (const u of j.result) {
     state.updateOffset = u.update_id + 1;
     const m = u.message, text = m && m.text || "";
-    let cmd = (text.match(/^\/(burn|website)(@\w+)?(\s|$)/i) || [])[1];
-    // Any message that mentions "website" gets the links too, at most once a minute per chat.
-    if (!cmd && /\bwebsites?\b/i.test(text)) {
-      const last = websiteReplyAt.get(m.chat.id) || 0;
-      if (Date.now() - last > 60000) { cmd = "website"; websiteReplyAt.set(m.chat.id, Date.now()); }
+    let cmd = (text.match(/^\/(burn|website|contract)(@\w+)?(\s|$)/i) || [])[1];
+    /* A bare mention answers too, so nobody has to know the command exists. Rate
+       limited per chat and per word, or a lively conversation about contracts would
+       have the bot replying to every line. */
+    if (!cmd) {
+      for (const [word, re] of [["website", /\bwebsites?\b/i], ["contract", /\bcontracts?\b/i]]) {
+        if (!re.test(text)) continue;
+        const key = m.chat.id + ":" + word;
+        const last = mentionReplyAt.get(key) || 0;
+        if (Date.now() - last > 60000) { cmd = word; mentionReplyAt.set(key, Date.now()); }
+        break;
+      }
     }
     if (!cmd) continue;
     try {
-      const reply = cmd.toLowerCase() === "burn" ? await burnMessage(cfg, ps) : websiteMessage();
+      const c = cmd.toLowerCase();
+      const reply = c === "burn" ? await burnMessage(cfg, ps)
+        : c === "contract" ? contractMessage(cfg)
+        : websiteMessage();
       await send(cfg, reply, { chatId: m.chat.id, replyTo: m.message_id });
       console.log(new Date().toISOString(), `answered /${cmd.toLowerCase()} in chat`, m.chat.id);
     } catch (e) { console.error(`answering /${cmd} failed:`, e.message || e); }
   }
   if (j.result.length) saveState(state);
 }
-const websiteReplyAt = new Map();   // chat id -> when the links were last sent for a plain mention
+const mentionReplyAt = new Map();   // "chatId:word" -> when a bare mention was last answered
+
+/* The address goes out three ways on purpose: as a tap-to-copy code span, which is
+   what someone pasting it into a wallet actually needs; as a link to the explorer;
+   and with the chart beside it. */
+function contractMessage(cfg) {
+  const a = PAMP_TOKEN;
+  return [
+    `*$PAMP TOKEN*`,
+    "`" + a + "`",
+    ``,
+    `[Explorer](${cfg.explorer}/address/${a}) · [Chart](${cfg.dexscreener}) · [Dashboard](${cfg.dashboard})`
+  ].join("\n");
+}
 function websiteMessage() {
   return [
     `$PAMP PROTOCOL: 🔥${esc("https://willis5555.github.io/PAMP/")}`,
@@ -267,7 +290,8 @@ async function registerCommands(cfg) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ commands: [
       { command: "burn", description: "$FUEL and $MORE burned by the $PAMP protocol" },
-      { command: "website", description: "links to the $PAMP, $FUEL and $MORE dashboards" }
+      { command: "website", description: "links to the $PAMP, $FUEL and $MORE dashboards" },
+      { command: "contract", description: "the $PAMP token address" }
     ] })
   }).catch(() => {});
 }
