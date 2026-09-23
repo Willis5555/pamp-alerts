@@ -238,7 +238,12 @@ async function handleCommands(cfg, ps, state) {
   for (const u of j.result) {
     state.updateOffset = u.update_id + 1;
     const m = u.message, text = m && m.text || "";
-    const cmd = (text.match(/^\/(burn|website)(@\w+)?(\s|$)/i) || [])[1];
+    let cmd = (text.match(/^\/(burn|website)(@\w+)?(\s|$)/i) || [])[1];
+    // Any message that mentions "website" gets the links too, at most once a minute per chat.
+    if (!cmd && /websites?/i.test(text)) {
+      const last = websiteReplyAt.get(m.chat.id) || 0;
+      if (Date.now() - last > 60000) { cmd = "website"; websiteReplyAt.set(m.chat.id, Date.now()); }
+    }
     if (!cmd) continue;
     try {
       const reply = cmd.toLowerCase() === "burn" ? await burnMessage(cfg, ps) : websiteMessage();
@@ -248,6 +253,7 @@ async function handleCommands(cfg, ps, state) {
   }
   if (j.result.length) saveState(state);
 }
+const websiteReplyAt = new Map();   // chat id -> when the links were last sent for a plain mention
 function websiteMessage() {
   return [
     `$PAMP PROTOCOL: 🔥${esc("https://willis5555.github.io/PAMP/")}`,
