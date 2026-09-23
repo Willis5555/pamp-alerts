@@ -238,19 +238,31 @@ async function handleCommands(cfg, ps, state) {
   for (const u of j.result) {
     state.updateOffset = u.update_id + 1;
     const m = u.message, text = m && m.text || "";
-    if (!/^\/burn(@\w+)?(\s|$)/i.test(text)) continue;
+    const cmd = (text.match(/^\/(burn|website)(@\w+)?(\s|$)/i) || [])[1];
+    if (!cmd) continue;
     try {
-      await send(cfg, await burnMessage(cfg, ps), { chatId: m.chat.id, replyTo: m.message_id });
-      console.log(new Date().toISOString(), "answered /burn in chat", m.chat.id);
-    } catch (e) { console.error("answering /burn failed:", e.message || e); }
+      const reply = cmd.toLowerCase() === "burn" ? await burnMessage(cfg, ps) : websiteMessage();
+      await send(cfg, reply, { chatId: m.chat.id, replyTo: m.message_id });
+      console.log(new Date().toISOString(), `answered /${cmd.toLowerCase()} in chat`, m.chat.id);
+    } catch (e) { console.error(`answering /${cmd} failed:`, e.message || e); }
   }
   if (j.result.length) saveState(state);
+}
+function websiteMessage() {
+  return [
+    `$PAMP PROTOCOL: 🔥${esc("https://willis5555.github.io/PAMP/")}`,
+    `$FUEL PROTOCOL:   ⛽️${esc("https://willis5555.github.io/FUEL/")}`,
+    `$MORE STAKING:     🟢${esc("https://willis5555.github.io/MOREDASHBOARD/")}`
+  ].join("\n");
 }
 async function registerCommands(cfg) {
   if (DRY || !cfg.telegramBotToken) return;
   await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/setMyCommands`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ commands: [{ command: "burn", description: "$FUEL and $MORE burned by the $PAMP protocol" }] })
+    body: JSON.stringify({ commands: [
+      { command: "burn", description: "$FUEL and $MORE burned by the $PAMP protocol" },
+      { command: "website", description: "links to the $PAMP, $FUEL and $MORE dashboards" }
+    ] })
   }).catch(() => {});
 }
 
@@ -355,6 +367,11 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
     await send(cfg, "🧪 *Test — last entry* " + esc(`(${ago} min ago)`) + ":\n\n" + entryMessage(cfg, built.e, built.ctx));
     console.log("last entry test sent:", built.e.tx); return;
+  }
+  if (process.argv.includes("--website-test")) {
+    await send(cfg, "🧪 *Test — what /website answers:*\n\n" + websiteMessage());
+    if (!DRY) console.log("website test sent");
+    return;
   }
   if (process.argv.includes("--burn-test")) {
     const text = await burnMessage(cfg, ps);

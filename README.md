@@ -56,6 +56,9 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
   values. Works in the group and in a direct message to the bot. To see the wording without
   waiting for someone to ask: `node entry-alerts.js --burn-test` posts the answer to the group.
 
+- `/website` — replies with the links to the $PAMP, $FUEL and $MORE dashboards.
+  `node entry-alerts.js --website-test` posts the answer to the group.
+
 ## Options (config.json)
 
 | Key | Default | Meaning |
