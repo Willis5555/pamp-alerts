@@ -57,6 +57,7 @@ const ABI = [
 const SCHEDULE_ABI = ["function emissionFor(uint256) view returns (uint256)"];
 const BURNER_ABI = ["event LegBurned(uint256 indexed leg, uint256 ethIn, uint256 moreBurned)"];
 const MORE_TOKEN = "0xc0F1A40512114b25cc1F30b5DF0bb48691405555";
+const PAMP_TOKEN = "0x64D1472d061a6B4a0ebE4B31Ad30f3774df219a6";
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 const ZERO_TOPIC = ethers.zeroPadValue("0x00", 32);
 const SWAP_IFACE = new ethers.Interface(["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"]);
@@ -117,19 +118,30 @@ const hms = secs => { secs = Math.max(0, secs); const h = Math.floor(secs / 3600
 
 function entryMessage(cfg, ev, ctx) {
   const shown = Number(ev.day) - cfg.dayOffset;
-  const dayLabel = shown >= 1 ? `day ${shown}` : "pre\\-launch day";
+  const dayLabel = shown >= 1 ? `Day ${shown}` : "Pre\\-launch day";
   const share = ctx.dayEntries > 0n ? Number((ev.count * 10000n) / ctx.dayEntries) / 100 : 100;
   const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * ev.count) / ctx.dayEntries : null;
+  const usd = ctx.usd || {};
+  const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
+  // every entry is worth 0.0001 ETH: what was sent plus the $FUEL it took
+  const entered = ev.count * 10n ** 14n;
   const lines = [
-    `🟢 *New entry* — ${esc(dayLabel)}`,
-    `[${esc(short(ev.buyer))}](${cfg.explorer}/address/${ev.buyer}) entered *${esc(nf(ev.count))}* ${ev.count === 1n ? "entry" : "entries"}`,
-    `${esc(fmtEth(ev.ethPaid))} paid · burned *${esc(fmtTok(ev.fuelBurned))} $FUEL* and *${esc(fmtTok(ev.moreBurned ?? 0n))} $MORE* in this tx`,
-    `Day so far: *${esc(nf(ctx.dayEntries))}* entries · this wallet holds ${esc(share.toFixed(1))}% of them`,
+    `🟢⛽ *New entry* · ${esc(dayLabel)}⛽🟢`,
+    ``,
+    `🎟 *${esc(nf(ev.count))}* ${ev.count === 1n ? "entry" : "entries"} · ${esc(fmtEth(entered))}${val(entered, usd.eth)}`,
+    `⛽ *${esc(fmtTok(ev.fuelBurned))} $FUEL* burned${val(ev.fuelBurned, usd.fuel)}`,
+    `🟢 *${esc(fmtTok(ev.moreBurned ?? 0n))} $MORE* burned${val(ev.moreBurned ?? 0n, usd.more)}`,
+    ``,
+    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries · this wallet *${esc(Math.round(share))}% of the lobby*`,
   ];
-  if (est) lines.push(`Their share if the day closed now: ≈ ${esc(fmtTok(est, 0))} $PAMP`);
-  if (ctx.secondsLeft != null) lines.push(`Day closes in ${esc(hms(ctx.secondsLeft))}`);
-  lines.push(`[tx](${cfg.explorer}/tx/${ev.tx}) · [dashboard](${cfg.dashboard})`);
+  if (est) lines.push(`🎁 If the day closed now: *≈ ${esc(fmtTok(est, 0))} $PAMP*${val(est, usd.pamp)}`);
+  if (ctx.secondsLeft != null) lines.push(`⏳ Day closes in *${esc(hms(ctx.secondsLeft))}*`);
+  lines.push(``, `[tx](${cfg.explorer}/tx/${ev.tx}) · [wallet](${cfg.explorer}/address/${ev.buyer}) · [dashboard](${cfg.dashboard}) · [chart](${cfg.dexscreener})`);
   return lines.join("\n");
+}
+async function entryPrices(cfg) {
+  const u = await tokenUsd(cfg);
+  return { eth: u.eth, fuel: u[cfg.fuelToken.toLowerCase()], more: u[MORE_TOKEN.toLowerCase()], pamp: u[PAMP_TOKEN.toLowerCase()] };
 }
 function rolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
   const c = Number(closedDay) - cfg.dayOffset, n = Number(newDay) - cfg.dayOffset;
@@ -148,13 +160,16 @@ async function tokenUsd(cfg) {
   if (Date.now() - tokenPriceCache.at < 60000) return tokenPriceCache.usd;
   const usd = {};
   try {
-    const j = await (await fetch(`https://api.dexscreener.com/tokens/v1/robinhood/${cfg.fuelToken},${MORE_TOKEN}`)).json();
+    const j = await (await fetch(`https://api.dexscreener.com/tokens/v1/robinhood/${cfg.fuelToken},${MORE_TOKEN},${PAMP_TOKEN}`)).json();
     const best = {};
     for (const pr of Array.isArray(j) ? j : []) {
       const k = pr.baseToken.address.toLowerCase(), liq = pr.liquidity && pr.liquidity.usd || 0;
-      if (!best[k] || liq > best[k].liq) best[k] = { liq, usd: Number(pr.priceUsd) };
+      if (!best[k] || liq > best[k].liq) best[k] = { liq, usd: Number(pr.priceUsd), native: Number(pr.priceNative), quote: pr.quoteToken && pr.quoteToken.symbol };
     }
     for (const k of Object.keys(best)) usd[k] = best[k].usd;
+    // ETH itself: any pair quoted in WETH gives it as priceUsd / priceNative
+    const q = Object.values(best).find(b => b.native > 0 && /ETH/i.test(b.quote || ""));
+    if (q) usd.eth = q.usd / q.native;
   } catch {}
   tokenPriceCache = { at: Date.now(), usd };
   return usd;
@@ -259,6 +274,7 @@ async function poll(cfg, ps, state) {
       const a = new ethers.Contract(cfg.auction, ABI, ps[0]);
       const [t, dayEntries] = await withRpc(ps, async p => Promise.all([a.connect(p).today(), a.connect(p).dayEntries(e.day)]));
       const ctx = { dayEntries, emission: t.day === e.day ? t.emission : null, secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
+      ctx.usd = await entryPrices(cfg).catch(() => ({}));
       await send(cfg, entryMessage(cfg, e, ctx));
       console.log(new Date().toISOString(), "posted entry", short(e.buyer), String(e.count), "day", String(e.day));
     }
@@ -313,7 +329,7 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
   if (process.argv.includes("--test")) {
     // one sample alert through the real formatter, so the chat and the markup are proven
     const sample = { buyer: "0xB4b28BF331b721a6B99D3DbD58DF5A9907d4DCAa", day: 2n, count: 35n, ethPaid: 21n * 10n ** 14n, fuelBurned: 561870n * 10n ** 18n, moreBurned: 53201n * 10n ** 18n, tx: "0x5b7f31bdfafe17ae60c7370d89ef78913e6bfe008a728f908862d22ad71dc496" };
-    await send(cfg, "🧪 *Test alert* — this is what an entry looks like:\n\n" + entryMessage(cfg, sample, { dayEntries: 42n, emission: 255739n * 10n ** 18n, secondsLeft: 79620 }));
+    await send(cfg, "🧪 *Test alert* — this is what an entry looks like:\n\n" + entryMessage(cfg, sample, { dayEntries: 42n, emission: 255739n * 10n ** 18n, secondsLeft: 79620, usd: await entryPrices(cfg).catch(() => ({})) }));
     console.log("test alert sent"); return;
   }
   if (process.argv.includes("--burn-test")) {
