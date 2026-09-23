@@ -240,7 +240,7 @@ async function handleCommands(cfg, ps, state) {
     const m = u.message, text = m && m.text || "";
     let cmd = (text.match(/^\/(burn|website)(@\w+)?(\s|$)/i) || [])[1];
     // Any message that mentions "website" gets the links too, at most once a minute per chat.
-    if (!cmd && /websites?/i.test(text)) {
+    if (!cmd && /\bwebsites?\b/i.test(text)) {
       const last = websiteReplyAt.get(m.chat.id) || 0;
       if (Date.now() - last > 60000) { cmd = "website"; websiteReplyAt.set(m.chat.id, Date.now()); }
     }
