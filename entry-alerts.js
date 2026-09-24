@@ -49,6 +49,9 @@ const DEFAULTS = {
   staking: "0x6ebf3eAfc1fD08a1E51Ec3a7f7D254BAE1a9370E",
   stakeAlerts: true,
   stakeMinUsd: 0,         // only announce stakes worth at least this many dollars (0 = all)
+  // $PAMP claims: every Claimed event on the auction (a wallet collecting a closed day).
+  claimAlerts: true,
+  claimMinUsd: 0,         // only announce claims worth at least this many dollars (0 = all)
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -74,6 +77,29 @@ const SWAP_IFACE = new ethers.Interface(["event Swap(address indexed sender, add
 const SWAP_TOPIC = SWAP_IFACE.getEvent("Swap").topicHash;
 const STAKE_IFACE = new ethers.Interface(["event Staked(uint256 indexed stakeId, address indexed staker, uint256 amount, uint256 duration)"]);
 const STAKE_TOPIC = STAKE_IFACE.getEvent("Staked").topicHash;
+const CLAIM_IFACE = new ethers.Interface(["event Claimed(address indexed claimer, uint256 indexed day, uint256 entries, uint256 amount)"]);
+const CLAIM_TOPIC = CLAIM_IFACE.getEvent("Claimed").topicHash;
+
+/* One transaction can claim several days at once (claimMany): the lines are folded into
+   one message with the total, and the days listed. */
+function claimMessage(cfg, c, usd) {
+  const value = usd ? Number(ethers.formatEther(c.amount)) * usd : null;
+  const shown = c.days.map(d => Number(d) - cfg.dayOffset).filter(d => d >= 1);
+  const dayText = shown.length === 0 ? "the pre\\-launch day"
+    : shown.length === 1 ? `day ${shown[0]}`
+    : `${shown.length} days \\(${shown.slice(0, 6).join(", ")}${shown.length > 6 ? "…" : ""}\\)`;
+  return `🎁 *${esc(fmtTok(c.amount))} $PAMP* claimed${value !== null ? ` ≈ ${esc(fmtUsd(value))}` : ""} · ${esc(nf(c.entries))} ${c.entries === 1n ? "entry" : "entries"} on ${dayText} · [wallet](${cfg.explorer}/address/${c.claimer}) · [tx](${cfg.explorer}/tx/${c.tx})`;
+}
+function foldClaims(logs) {
+  const byTx = new Map();
+  for (const lg of logs) {
+    const a = CLAIM_IFACE.parseLog({ topics: [...lg.topics], data: lg.data }).args;
+    const c = byTx.get(lg.transactionHash) || { claimer: a.claimer, days: [], entries: 0n, amount: 0n, tx: lg.transactionHash, block: lg.blockNumber };
+    c.days.push(a.day); c.entries += a.getValue("entries"); c.amount += a.amount;   // getValue: a Result has its own .entries() method
+    byTx.set(lg.transactionHash, c);
+  }
+  return [...byTx.values()];
+}
 const fmtDate = ts => new Date(ts * 1000).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 
 function stakeMessage(cfg, st, usd) {
@@ -376,6 +402,17 @@ async function poll(cfg, ps, state) {
         console.log(new Date().toISOString(), "posted buy", pool.sym, fmtTok(out), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
       }
     }
+    // $PAMP claims: one line per claim transaction, however many days it collected.
+    if (cfg.claimAlerts) {
+      const logs = await withRpc(ps, p => p.getLogs({ address: cfg.auction, topics: [CLAIM_TOPIC], fromBlock: from, toBlock: head }));
+      for (const c of foldClaims(logs)) {
+        const usd = (await tokenUsd(cfg))[PAMP_TOKEN.toLowerCase()];
+        const value = usd ? Number(ethers.formatEther(c.amount)) * usd : null;
+        if (cfg.claimMinUsd > 0 && (value === null || value < cfg.claimMinUsd)) continue;
+        await send(cfg, claimMessage(cfg, c, usd));
+        console.log(new Date().toISOString(), "posted claim", fmtTok(c.amount), value !== null ? fmtUsd(value) : "", c.tx.slice(0, 12));
+      }
+    }
     // $PAMP stakes: one line per stake opened.
     if (cfg.stakeAlerts && cfg.staking) {
       const logs = await withRpc(ps, p => p.getLogs({ address: cfg.staking, topics: [STAKE_TOPIC], fromBlock: from, toBlock: head }));
@@ -428,6 +465,18 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
     await send(cfg, "🧪 *Test — last entry* " + esc(`(${ago} min ago)`) + ":\n\n" + entryMessage(cfg, built.e, built.ctx));
     console.log("last entry test sent:", built.e.tx); return;
+  }
+  if (process.argv.includes("--test-last-claim")) {
+    const head = await withRpc(ps, p => p.getBlockNumber());
+    const logs = await withRpc(ps, p => p.getLogs({ address: cfg.auction, topics: [CLAIM_TOPIC], fromBlock: Math.max(cfg.auctionDeployBlock, head - 400000), toBlock: head }));
+    if (!logs.length) { console.log("no claim found recently"); return; }
+    const c = foldClaims(logs).sort((a, b) => b.block - a.block)[0];
+    const blk = await withRpc(ps, p => p.getBlock(c.block));
+    const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
+    const usd = (await tokenUsd(cfg))[PAMP_TOKEN.toLowerCase()];
+    await send(cfg, "🧪 *Test — last claim* " + esc(`(${ago} min ago)`) + ":\n" + claimMessage(cfg, c, usd));
+    if (!DRY) console.log("last claim test sent:", c.tx);
+    return;
   }
   if (process.argv.includes("--test-last-stake")) {
     const head = await withRpc(ps, p => p.getBlockNumber());

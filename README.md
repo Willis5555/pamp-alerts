@@ -78,6 +78,8 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 | `fuelBuyMinUsd` | 25 | only announce $FUEL buys worth at least this many dollars |
 | `stakeAlerts` | true | also post "🔒 12,345 $PAMP staked ≈ $9 · 90 days · unlocks Dec 22, 2026 · wallet · tx" for every stake opened |
 | `stakeMinUsd` | 0 | only announce stakes worth at least this many dollars |
+| `claimAlerts` | true | also post "🎁 48,901 $PAMP claimed ≈ $37 · 170 entries on day 1 · wallet · tx" for every claim; a claimMany is one message |
+| `claimMinUsd` | 0 | only announce claims worth at least this many dollars |
 | `pampPair` | PAMP/WETH V3 pool | the pool watched for buys; `dexscreener` is the chart link in the message |
 | `dayOffset` | 1 | the dashboard shows the contract's day 2 as day 1; the bot says the same |
 | `rpc` | official + dRPC | endpoints, tried in order |
