@@ -61,7 +61,7 @@ const DEFAULTS = {
   pulseToken: "0xd5E952eA1B17034Ad3368805ed9CFB08009deA79",
   pulseFuel: "0x6633aeDbB64115391238D7ce56D2DFAa2e0c7b45",
   pulseExplorer: "https://scan.pulsechain.com",
-  pulseDashboard: "https://willis5555.github.io/PAMP/PLS/",
+  pulseDashboard: "https://pulsepamp.github.io/369/",
   pulseLookbackBlocks: 2000,   // with no saved state, scan this far back (~5.5 h at ~10 s blocks)
   pulseMinEntries: 1,
   telegramBotToken: "",
