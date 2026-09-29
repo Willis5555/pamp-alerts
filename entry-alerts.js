@@ -436,7 +436,7 @@ async function handleCommands(cfg, ps, state) {
       const c = cmd.toLowerCase();
       const reply = c === "burn" ? await burnMessage(cfg, ps)
         : c === "contract" ? contractMessage(cfg)
-        : websiteMessage();
+        : websiteMessage(cfg);
       await send(cfg, reply, { chatId: m.chat.id, replyTo: m.message_id });
       console.log(new Date().toISOString(), `answered /${cmd.toLowerCase()} in chat`, m.chat.id);
     } catch (e) { console.error(`answering /${cmd} failed:`, e.message || e); }
@@ -450,16 +450,26 @@ const mentionReplyAt = new Map();   // "chatId:word" -> when a bare mention was 
    and with the chart beside it. */
 function contractMessage(cfg) {
   const a = PAMP_TOKEN;
-  return [
-    `*$PAMP TOKEN*`,
+  const lines = [
+    `*$PAMP TOKEN · Robinhood*`,
     "`" + a + "`",
-    ``,
     `[Explorer](${cfg.explorer}/address/${a}) · [Chart](${cfg.dexscreener}) · [Dashboard](${cfg.dashboard})`
-  ].join("\n");
+  ];
+  if (cfg.pulse && cfg.pulseToken) {
+    const b = cfg.pulseToken;
+    lines.push(
+      ``,
+      `*$PAMP TOKEN · PulseChain*`,
+      "`" + b + "`",
+      `[Explorer](${cfg.pulseExplorer}/address/${b}) · [Dashboard](${cfg.pulseDashboard})`
+    );
+  }
+  return lines.join("\n");
 }
-function websiteMessage() {
+function websiteMessage(cfg) {
   return [
     `$PAMP PROTOCOL: 🔥${esc("https://willis5555.github.io/PAMP/")}`,
+    ...(cfg.pulse && cfg.pulseDashboard ? [`$PAMP PULSECHAIN: 🟣${esc(cfg.pulseDashboard)}`] : []),
     `$FUEL PROTOCOL:   ⛽️${esc("https://willis5555.github.io/FUEL/")}`,
     `$MORE STAKING:     🟢${esc("https://willis5555.github.io/MOREDASHBOARD/")}`
   ].join("\n");
@@ -470,8 +480,8 @@ async function registerCommands(cfg) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ commands: [
       { command: "burn", description: "$FUEL and $MORE burned by the $PAMP protocol" },
-      { command: "website", description: "links to the $PAMP, $FUEL and $MORE dashboards" },
-      { command: "contract", description: "the $PAMP token address" }
+      { command: "website", description: "links to the $PAMP (Robinhood and PulseChain), $FUEL and $MORE dashboards" },
+      { command: "contract", description: "the $PAMP token addresses on Robinhood and PulseChain" }
     ] })
   }).catch(() => {});
 }
@@ -647,7 +657,7 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     return;
   }
   if (process.argv.includes("--website-test")) {
-    await send(cfg, "🧪 *Test — what /website answers:*\n\n" + websiteMessage());
+    await send(cfg, "🧪 *Test — what /website answers:*\n\n" + websiteMessage(cfg));
     if (!DRY) console.log("website test sent");
     return;
   }
