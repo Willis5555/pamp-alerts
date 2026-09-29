@@ -2,7 +2,8 @@
 "use strict";
 /* PAMP entry alerts for Telegram.
    Watches the DailyAuctionV2 contract on Robinhood Chain and posts one message per entry
-   transaction, plus a note when a day closes. Plain Node: no framework, no database. State
+   transaction, plus a note when a day closes. It watches the PulseChain auction the same way
+   (`pulse*` settings; `"pulse": false` turns that off). Plain Node: no framework, no database. State
    (the last block handled) lives in a small JSON file next to this script so a restart never
    posts the same entry twice.
 
@@ -52,6 +53,17 @@ const DEFAULTS = {
   // $PAMP claims: every Claimed event on the auction (a wallet collecting a closed day).
   claimAlerts: true,
   claimMinUsd: 0,         // only announce claims worth at least this many dollars (0 = all)
+  // ---- PulseChain PAMP (chain 369): entries and day closes, posted to the same chat
+  pulse: true,
+  pulseRpc: ["https://rpc.pulsechain.com", "https://pulsechain-rpc.publicnode.com"],
+  pulseAuction: "0x0cb79f2123DA9fba7Ee8Fcad12206c959525Eb72",
+  pulseAuctionDeployBlock: 27670648,
+  pulseToken: "0xd5E952eA1B17034Ad3368805ed9CFB08009deA79",
+  pulseFuel: "0x6633aeDbB64115391238D7ce56D2DFAa2e0c7b45",
+  pulseExplorer: "https://scan.pulsechain.com",
+  pulseDashboard: "https://willis5555.github.io/PAMP/PLS/",
+  pulseLookbackBlocks: 2000,   // with no saved state, scan this far back (~5.5 h at ~10 s blocks)
+  pulseMinEntries: 1,
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -101,6 +113,130 @@ function foldClaims(logs) {
   return [...byTx.values()];
 }
 const fmtDate = ts => new Date(ts * 1000).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+
+// ---------------------------------------------------------------- PulseChain
+/* The PulseChain auction (DailyAuctionPulse): each entry is worth 25,000 PLS, paid as PLS
+   plus $FUEL burned by value. The PLS goes to the PAMP buy and burn and the PLS yield (the
+   PlsSplit event in the same transaction). Its days need no offset: day 1 is the first day. */
+const PULSE_ABI = [
+  "event Entered(address indexed buyer, uint256 indexed day, uint256 count, uint256 plsPaid, uint256 fuelBurned)",
+  "event PlsSplit(uint256 indexed day, uint256 toYield, uint256 toBurn, uint256 toDev)",
+  "function currentDay() view returns (uint256)",
+  "function dayEntries(uint256) view returns (uint256)",
+  "function userEntries(uint256,address) view returns (uint256)",
+  "function totalEntries() view returns (uint256)",
+  "function today() view returns (uint256 day, uint256 emission, uint256 entries, uint256 secondsLeft)",
+  "function schedule() view returns (address)"
+];
+const PULSE_IFACE = new ethers.Interface(PULSE_ABI);
+const PULSE_ENTERED = PULSE_IFACE.getEvent("Entered").topicHash;
+const PULSE_SPLIT = PULSE_IFACE.getEvent("PlsSplit").topicHash;
+const PULSE_ENTRY_PLS = 25000n * 10n ** 18n;
+const fmtPls = wei => nf(Number(ethers.formatEther(wei)), 0) + " PLS";
+
+function pulseProviders(cfg) {
+  return cfg.pulseRpc.map(url => {
+    const req = new ethers.FetchRequest(url); req.timeout = 15000;
+    return new ethers.JsonRpcProvider(req, { chainId: 369, name: "pulsechain" }, { staticNetwork: true, batchMaxCount: 1 });
+  });
+}
+// PLS, $FUEL and $PAMP in dollars from DexScreener's PulseChain pairs, cached a minute.
+let pulsePriceCache = { at: 0, usd: {} };
+async function pulseUsd(cfg) {
+  if (Date.now() - pulsePriceCache.at < 60000) return pulsePriceCache.usd;
+  const usd = {};
+  try {
+    const j = await (await fetch(`https://api.dexscreener.com/tokens/v1/pulsechain/${cfg.pulseFuel},${cfg.pulseToken}`)).json();
+    const best = {};
+    for (const pr of Array.isArray(j) ? j : []) {
+      const k = pr.baseToken.address.toLowerCase(), liq = pr.liquidity && pr.liquidity.usd || 0;
+      if (!best[k] || liq > best[k].liq) best[k] = { liq, usd: Number(pr.priceUsd), native: Number(pr.priceNative), quote: pr.quoteToken && pr.quoteToken.symbol };
+    }
+    usd.fuel = best[cfg.pulseFuel.toLowerCase()]?.usd;
+    usd.pamp = best[cfg.pulseToken.toLowerCase()]?.usd;
+    // PLS itself: a pair quoted in WPLS gives it as priceUsd / priceNative
+    const q = Object.values(best).find(b => b.native > 0 && /PLS/i.test(b.quote || ""));
+    if (q) usd.pls = q.usd / q.native;
+  } catch {}
+  pulsePriceCache = { at: Date.now(), usd };
+  return usd;
+}
+
+async function describePulseEntry(cfg, ps, lg) {
+  const a = PULSE_IFACE.parseLog({ topics: [...lg.topics], data: lg.data }).args;
+  const e = { buyer: a.buyer, day: a.day, count: a.count, plsPaid: a.plsPaid, fuelBurned: a.fuelBurned, tx: lg.transactionHash };
+  if (e.count < BigInt(cfg.pulseMinEntries)) return null;
+  // where the PLS went: the PlsSplit event in the same transaction
+  try {
+    const rc = await withRpc(ps, p => p.getTransactionReceipt(lg.transactionHash));
+    const s = rc.logs.find(x => x.address.toLowerCase() === cfg.pulseAuction.toLowerCase() && x.topics[0] === PULSE_SPLIT);
+    if (s) { const sa = PULSE_IFACE.parseLog({ topics: [...s.topics], data: s.data }).args; e.toYield = sa.toYield; e.toBurn = sa.toBurn; }
+  } catch {}
+  const c = new ethers.Contract(cfg.pulseAuction, PULSE_ABI, ps[0]);
+  const [t, dayEntries, userEntries] = await withRpc(ps, async p => Promise.all([c.connect(p).today(), c.connect(p).dayEntries(e.day), c.connect(p).userEntries(e.day, e.buyer)]));
+  const ctx = { dayEntries, userEntries, emission: t.day === e.day ? t.emission : null, secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
+  ctx.usd = await pulseUsd(cfg).catch(() => ({}));
+  return { e, ctx };
+}
+function pulseEntryMessage(cfg, ev, ctx) {
+  const mine = ctx.userEntries && ctx.userEntries > ev.count ? ctx.userEntries : ev.count;
+  const share = ctx.dayEntries > 0n ? Number((mine * 10000n) / ctx.dayEntries) / 100 : 100;
+  const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * mine) / ctx.dayEntries : null;
+  const usd = ctx.usd || {};
+  const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
+  const entered = ev.count * PULSE_ENTRY_PLS;
+  const lines = [
+    `🟣⛽ *New entry on PulseChain* · ${esc(`Day ${ev.day}`)}⛽🟣`,
+    ``,
+    `🎟 *${esc(nf(ev.count))}* ${ev.count === 1n ? "entry" : "entries"} · ${esc(fmtPls(entered))}${val(entered, usd.pls)}`,
+    `⛽ *${esc(fmtTok(ev.fuelBurned))} $FUEL* burned${val(ev.fuelBurned, usd.fuel)}`
+  ];
+  if (ev.toBurn) lines.push(`🔥 *${esc(fmtPls(ev.toBurn))}* to the $PAMP buy and burn${val(ev.toBurn, usd.pls)}`);
+  if (ev.toYield) lines.push(`💰 *${esc(fmtPls(ev.toYield))}* to the PLS yield${val(ev.toYield, usd.pls)}`);
+  lines.push(
+    ``,
+    `🧮 This wallet: *${esc(nf(mine))}* ${mine === 1n ? "entry" : "entries"} today · *${esc(Math.round(share))}% of the lobby*`,
+    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries`
+  );
+  if (est) lines.push(`🎁 If the day closed now: *≈ ${esc(fmtTok(est, 0))} $PAMP*${val(est, usd.pamp)}`);
+  if (ctx.secondsLeft != null) lines.push(`⏳ Day closes in *${esc(hms(ctx.secondsLeft))}*`);
+  lines.push(``, `[tx](${cfg.pulseExplorer}/tx/${ev.tx}) · [wallet](${cfg.pulseExplorer}/address/${ev.buyer}) · [dashboard](${cfg.pulseDashboard})`);
+  return lines.join("\n");
+}
+function pulseRolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
+  const per = closedEntries > 0n ? emission / closedEntries : 0n;
+  return [
+    `🔔 *PulseChain day ${esc(closedDay)} has closed*`,
+    `${esc(nf(closedEntries))} entries · ${esc(fmtTok(emission))} $PAMP to claim · ${closedEntries > 0n ? esc(fmtTok(per, 2)) + " $PAMP per entry" : "nobody entered, nothing minted"}`,
+    `*Day ${esc(newDay)} is open\\.* [Enter](${cfg.pulseDashboard})`
+  ].join("\n");
+}
+async function pollPulse(cfg, ps, state) {
+  const head = await withRpc(ps, p => p.getBlockNumber());
+  const from = state.pulseLastBlock ? state.pulseLastBlock + 1 : Math.max(cfg.pulseAuctionDeployBlock, head - (cfg.pulseLookbackBlocks || 0));
+  if (!state.pulseLastBlock) console.log("pulse: no saved state, scanning from block", from, "to", head);
+  if (from <= head) {
+    const logs = await withRpc(ps, p => p.getLogs({ address: cfg.pulseAuction, topics: [PULSE_ENTERED], fromBlock: from, toBlock: head }));
+    for (const lg of logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index)) {
+      const built = await describePulseEntry(cfg, ps, lg);
+      if (!built) continue;
+      await send(cfg, pulseEntryMessage(cfg, built.e, built.ctx));
+      console.log(new Date().toISOString(), "posted pulse entry", short(built.e.buyer), String(built.e.count), "day", String(built.e.day));
+    }
+    state.pulseLastBlock = head;
+  }
+  const c = new ethers.Contract(cfg.pulseAuction, PULSE_ABI, ps[0]);
+  const day = Number(await withRpc(ps, p => c.connect(p).currentDay()));
+  if (state.pulseLastDay && day > state.pulseLastDay) {
+    const closed = state.pulseLastDay;
+    const sched = new ethers.Contract(await withRpc(ps, p => c.connect(p).schedule()), SCHEDULE_ABI, ps[0]);
+    const [entries, emission] = await withRpc(ps, async p => Promise.all([c.connect(p).dayEntries(closed), sched.connect(p).emissionFor(closed)]));
+    await send(cfg, pulseRolloverMessage(cfg, closed, entries, emission, day));
+    console.log(new Date().toISOString(), "posted pulse rollover", closed, "->", day);
+  }
+  state.pulseLastDay = day;
+  saveState(state);
+}
 
 function stakeMessage(cfg, st, usd) {
   const days = Math.round(st.duration / 86400);
@@ -446,8 +582,22 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
 (async () => {
   const cfg = loadConfig();
   const ps = providers(cfg);
+  const pps = cfg.pulse ? pulseProviders(cfg) : null;
   const state = loadState();
-  if (DRY && process.argv.includes("--replay")) state.lastBlock = cfg.auctionDeployBlock - 1;  // dry-run over the whole history
+  if (DRY && process.argv.includes("--replay")) { state.lastBlock = cfg.auctionDeployBlock - 1; state.pulseLastBlock = cfg.pulseAuctionDeployBlock - 1; }  // dry-run over the whole history
+  if (process.argv.includes("--test-last-pulse")) {
+    // the most recent PulseChain entry, through the real formatter
+    const head = await withRpc(pps, p => p.getBlockNumber());
+    const logs = await withRpc(pps, p => p.getLogs({ address: cfg.pulseAuction, topics: [PULSE_ENTERED], fromBlock: cfg.pulseAuctionDeployBlock, toBlock: head }));
+    if (!logs.length) { console.log("no PulseChain entry yet"); return; }
+    const lg = logs[logs.length - 1];
+    const built = await describePulseEntry({ ...cfg, pulseMinEntries: 0 }, pps, lg);
+    const blk = await withRpc(pps, p => p.getBlock(lg.blockNumber));
+    const ago = Math.round((Date.now() / 1000 - Number(blk.timestamp)) / 60);
+    await send(cfg, "🧪 *Test — last PulseChain entry* " + esc(`(${ago} min ago)`) + ":\n\n" + pulseEntryMessage(cfg, built.e, built.ctx));
+    if (!DRY) console.log("last pulse entry test sent:", built.e.tx);
+    return;
+  }
   if (process.argv.includes("--test")) {
     // one sample alert through the real formatter, so the chat and the markup are proven
     const sample = { buyer: "0xB4b28BF331b721a6B99D3DbD58DF5A9907d4DCAa", day: 2n, count: 50n, ethPaid: 30n * 10n ** 14n, fuelBurned: 561870n * 10n ** 18n, moreBurned: 53201n * 10n ** 18n, tx: "0x5b7f31bdfafe17ae60c7370d89ef78913e6bfe008a728f908862d22ad71dc496" };
@@ -507,11 +657,16 @@ process.on("SIGTERM", () => { console.log("stopping (SIGTERM)"); process.exit(0)
     if (!DRY) console.log("burn test sent");
     return;
   }
-  console.log(`PAMP entry alerts ${DRY ? "(dry run) " : ""}watching ${cfg.auction} every ${cfg.pollSeconds}s`);
+  console.log(`PAMP entry alerts ${DRY ? "(dry run) " : ""}watching ${cfg.auction}${cfg.pulse ? ` and PulseChain ${cfg.pulseAuction}` : ""} every ${cfg.pollSeconds}s`);
   await registerCommands(cfg);
   for (;;) {
     try { await poll(cfg, ps, state); }
     catch (e) { console.error(new Date().toISOString(), "poll failed:", e.message || e); }
+    // PulseChain has its own try: a slow or failing PulseChain RPC never holds up Robinhood
+    if (pps) {
+      try { await pollPulse(cfg, pps, state); }
+      catch (e) { console.error(new Date().toISOString(), "pulse poll failed:", e.message || e); }
+    }
     try { await handleCommands(cfg, ps, state); }
     catch (e) { console.error(new Date().toISOString(), "commands failed:", e.message || e); }
     if (ONCE || (DRY && process.argv.includes("--replay"))) break;

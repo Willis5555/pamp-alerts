@@ -84,5 +84,14 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 | `dayOffset` | 1 | the dashboard shows the contract's day 2 as day 1; the bot says the same |
 | `rpc` | official + dRPC | endpoints, tried in order |
 | `auction` | v2 auction | the contract to watch |
+| `pulse` | true | also watch the PulseChain auction: "🟣⛽ New entry on PulseChain · Day N" per entry transaction (entries, PLS value, $FUEL burned, PLS to the buy and burn and to the yield, the wallet's share, projected $PAMP, time left), and "PulseChain day N has closed" when a day rolls over. Its own `try`, so a PulseChain outage never delays the Robinhood alerts |
+| `pulseAuction` / `pulseAuctionDeployBlock` | live PulseChain auction | the contract and where history starts |
+| `pulseRpc` | rpc.pulsechain.com + publicnode | PulseChain endpoints, tried in order |
+| `pulseDashboard` | …/PAMP/PLS/ | the dashboard link in PulseChain messages |
+| `pulseMinEntries` | 1 | ignore PulseChain transactions with fewer entries than this |
+| `pulseLookbackBlocks` | 2000 | with no saved PulseChain position, scan this far back (~5.5 hours) |
+
+`node entry-alerts.js --test-last-pulse` posts the most recent PulseChain entry to the group
+(add `--dry-run` to print it instead).
 
 Never commit `config.json`: it holds the bot token. `state.json` is harmless.
