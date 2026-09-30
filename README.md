@@ -93,6 +93,11 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 | `pulsePampBuys` | true | also post "🟣 12,345 $PAMP bought on PulseChain ≈ $12.34 · chart · tx" for every buy on a PAMP/WPLS pool on PulseX V2 or V1. The pool does not exist yet: the bot asks both factories each poll and starts watching the moment one appears |
 | `pulsePampBuyMinUsd` | 10 | only announce PulseChain $PAMP buys worth at least this many dollars (PLS paid × the PLS price) |
 | `pulseFactories` / `pulseWpls` | PulseX V2 + V1 / WPLS | where the PAMP/WPLS pool is looked for |
+| `pulseClaimAlerts` | true | post "🎁 19,741 $PAMP claimed on PulseChain ≈ $75.59 · 254 entries on day 1 · wallet · tx" per claim transaction (a claimMany is one message) |
+| `pulseClaimMinUsd` | 0 | only announce PulseChain claims worth at least this many dollars |
+| `pulseStakeAlerts` | true | post "🔒 51,317 $PAMP staked on PulseChain ≈ $196 · 1,000 days · unlocks Jun 25, 2029 · wallet · tx" per stake opened |
+| `pulseStakeMinUsd` | 0 | only announce PulseChain stakes worth at least this many dollars |
+| `pulseStaking` | the PulseChain staking contract | where stakes are read |
 
 `node entry-alerts.js --test-last-pulse` posts the most recent PulseChain entry to the group
 (add `--dry-run` to print it instead).

@@ -69,6 +69,12 @@ const DEFAULTS = {
   pulsePampBuyMinUsd: 10,     // only announce buys worth at least this many dollars (0 = all)
   pulseWpls: "0xA1077a294dDE1B09bB078844df40758a5D0f9a27",
   pulseFactories: ["0x29eA7545DEf87022BAdc76323F373EA1e707C523", "0x1715a3E4A142d8b698131108995174F37aEBA10D"],   // PulseX V2, V1
+  // PulseChain claims (PAMP won in the auction, with its PLS yield) and stakes (opened, and PLS yield claimed from one)
+  pulseStaking: "0x008d3398E3b477d5D026B9013D0aC419b14176d3",
+  pulseClaimAlerts: true,
+  pulseClaimMinUsd: 0,
+  pulseStakeAlerts: true,
+  pulseStakeMinUsd: 0,
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -244,6 +250,70 @@ async function pollPulseBuys(cfg, ps, from, head) {
   }
 }
 
+/* PulseChain claims and stakes. The auction's Claimed also carries the PLS yield paid with the PAMP;
+   a claimMany is one message. Stakes opened come from the staking contract's Staked. (PLS yield
+   claimed from a stake is left out on purpose.) */
+const PULSE_CLAIM = new ethers.Interface(["event Claimed(address indexed claimer, uint256 indexed day, uint256 entries, uint256 amount, uint256 plsYield)"]);
+const PULSE_CLAIM_TOPIC = PULSE_CLAIM.getEvent("Claimed").topicHash;
+const PULSE_STAKING = new ethers.Interface(["event Staked(uint256 indexed stakeId, address indexed staker, uint256 amount, uint256 duration)"]);
+const PULSE_STAKED_TOPIC = PULSE_STAKING.getEvent("Staked").topicHash;
+/* $PAMP in dollars: DexScreener's price once it lists the pool, otherwise the pool's own reserves × the PLS price */
+async function pulsePampUsd(cfg, ps) {
+  const u = await pulseUsd(cfg).catch(() => ({}));
+  if (u.pamp) return { pamp: u.pamp, pls: u.pls };
+  await findPulsePampPairs(cfg, ps).catch(() => {});
+  const first = [...pulsePampPairs.values()][0];
+  if (!first || !u.pls) return { pamp: null, pls: u.pls ?? null };
+  try {
+    const pc = new ethers.Contract(first.pair, ["function getReserves() view returns (uint112, uint112, uint32)"], ps[0]);
+    const r = await withRpc(ps, p => pc.connect(p).getReserves());
+    const pamp = first.pampIs0 ? r[0] : r[1], pls = first.pampIs0 ? r[1] : r[0];
+    return { pamp: pamp > 0n ? (Number(ethers.formatEther(pls)) / Number(ethers.formatEther(pamp))) * u.pls : null, pls: u.pls };
+  } catch { return { pamp: null, pls: u.pls }; }
+}
+const usdText = v => v !== null && isFinite(v) ? ` ≈ ${esc(fmtUsd(v))}` : "";
+function pulseClaimMessage(cfg, c, px) {
+  // the PAMP claimed, valued on its own (the PLS yield paid with it is not shown)
+  const value = px.pamp ? Number(ethers.formatEther(c.amount)) * px.pamp : null;
+  const days = c.days.map(Number);
+  const dayText = days.length === 1 ? `day ${days[0]}` : `${days.length} days \\(${days.slice(0, 6).join(", ")}${days.length > 6 ? "…" : ""}\\)`;
+  return `🎁 *${esc(fmtTok(c.amount))} $PAMP* claimed on PulseChain${usdText(value)} · ${esc(nf(c.entries))} ${c.entries === 1n ? "entry" : "entries"} on ${dayText} · [wallet](${cfg.pulseExplorer}/address/${c.claimer}) · [tx](${cfg.pulseExplorer}/tx/${c.tx})`;
+}
+function pulseStakeMessage(cfg, st, px) {
+  const days = Math.round(st.duration / 86400);
+  return `🔒 *${esc(fmtTok(st.amount))} $PAMP* staked on PulseChain${usdText(px.pamp ? Number(ethers.formatEther(st.amount)) * px.pamp : null)} · *${esc(nf(days))} days* · unlocks ${esc(fmtDate(st.unlockAt))} · [wallet](${cfg.pulseExplorer}/address/${st.staker}) · [tx](${cfg.pulseExplorer}/tx/${st.tx})`;
+}
+async function pollPulseClaimsAndStakes(cfg, ps, from, head) {
+  const [claims, staking] = await Promise.all([
+    cfg.pulseClaimAlerts ? withRpc(ps, p => p.getLogs({ address: cfg.pulseAuction, topics: [PULSE_CLAIM_TOPIC], fromBlock: from, toBlock: head })) : [],
+    cfg.pulseStakeAlerts ? withRpc(ps, p => p.getLogs({ address: cfg.pulseStaking, topics: [PULSE_STAKED_TOPIC], fromBlock: from, toBlock: head })) : []
+  ]);
+  if (!claims.length && !staking.length) return;
+  const px = await pulsePampUsd(cfg, ps);
+  // claims, folded per transaction (a claimMany collects several days at once)
+  const byTx = new Map();
+  for (const lg of claims.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index)) {
+    const a = PULSE_CLAIM.parseLog({ topics: [...lg.topics], data: lg.data }).args;
+    const c = byTx.get(lg.transactionHash) || { claimer: a.claimer, days: [], entries: 0n, amount: 0n, pls: 0n, tx: lg.transactionHash };
+    c.days.push(a.day); c.entries += a.getValue("entries"); c.amount += a.amount; c.pls += a.plsYield;
+    byTx.set(lg.transactionHash, c);
+  }
+  for (const c of byTx.values()) {
+    const value = px.pamp ? Number(ethers.formatEther(c.amount)) * px.pamp : null;
+    if (cfg.pulseClaimMinUsd > 0 && (value === null || value < cfg.pulseClaimMinUsd)) continue;
+    await send(cfg, pulseClaimMessage(cfg, c, px));
+    console.log(new Date().toISOString(), "posted pulse claim", fmtTok(c.amount), "PAMP +", fmtPls(c.pls), c.tx.slice(0, 12));
+  }
+  for (const lg of staking.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index)) {
+    const ev = PULSE_STAKING.parseLog({ topics: [...lg.topics], data: lg.data });
+    const blk = await withRpc(ps, p => p.getBlock(lg.blockNumber));
+    const st = { staker: ev.args.staker, amount: ev.args.amount, duration: Number(ev.args.duration), unlockAt: Number(blk.timestamp) + Number(ev.args.duration), tx: lg.transactionHash };
+    if (cfg.pulseStakeMinUsd > 0 && (!px.pamp || Number(ethers.formatEther(st.amount)) * px.pamp < cfg.pulseStakeMinUsd)) continue;
+    await send(cfg, pulseStakeMessage(cfg, st, px));
+    console.log(new Date().toISOString(), "posted pulse stake", fmtTok(st.amount), lg.transactionHash.slice(0, 12));
+  }
+}
+
 async function pollPulse(cfg, ps, state) {
   const head = await withRpc(ps, p => p.getBlockNumber());
   const from = state.pulseLastBlock ? state.pulseLastBlock + 1 : Math.max(cfg.pulseAuctionDeployBlock, head - (cfg.pulseLookbackBlocks || 0));
@@ -257,6 +327,7 @@ async function pollPulse(cfg, ps, state) {
       console.log(new Date().toISOString(), "posted pulse entry", short(built.e.buyer), String(built.e.count), "day", String(built.e.day));
     }
     if (cfg.pulsePampBuys) await pollPulseBuys(cfg, ps, from, head);
+    if (cfg.pulseClaimAlerts || cfg.pulseStakeAlerts) await pollPulseClaimsAndStakes(cfg, ps, from, head);
     state.pulseLastBlock = head;
   }
   const c = new ethers.Contract(cfg.pulseAuction, PULSE_ABI, ps[0]);
