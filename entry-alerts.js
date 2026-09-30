@@ -64,6 +64,11 @@ const DEFAULTS = {
   pulseDashboard: "https://pulsepamp.github.io/369/",
   pulseLookbackBlocks: 2000,   // with no saved state, scan this far back (~5.5 h at ~10 s blocks)
   pulseMinEntries: 1,
+  // $PAMP buys on PulseChain: any PAMP/WPLS pair on the PulseX factories below, found as soon as it exists
+  pulsePampBuys: true,
+  pulsePampBuyMinUsd: 10,     // only announce buys worth at least this many dollars (0 = all)
+  pulseWpls: "0xA1077a294dDE1B09bB078844df40758a5D0f9a27",
+  pulseFactories: ["0x29eA7545DEf87022BAdc76323F373EA1e707C523", "0x1715a3E4A142d8b698131108995174F37aEBA10D"],   // PulseX V2, V1
   telegramBotToken: "",
   telegramChatId: ""
 };
@@ -173,34 +178,23 @@ async function describePulseEntry(cfg, ps, lg) {
     if (s) { const sa = PULSE_IFACE.parseLog({ topics: [...s.topics], data: s.data }).args; e.toYield = sa.toYield; e.toBurn = sa.toBurn; }
   } catch {}
   const c = new ethers.Contract(cfg.pulseAuction, PULSE_ABI, ps[0]);
-  const [t, dayEntries, userEntries] = await withRpc(ps, async p => Promise.all([c.connect(p).today(), c.connect(p).dayEntries(e.day), c.connect(p).userEntries(e.day, e.buyer)]));
-  const ctx = { dayEntries, userEntries, emission: t.day === e.day ? t.emission : null, secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
+  // only the countdown is shown now; the wallet's share, the day's count and the estimate were dropped
+  const t = await withRpc(ps, p => c.connect(p).today());
+  const ctx = { secondsLeft: t.day === e.day ? Number(t.secondsLeft) : null };
   ctx.usd = await pulseUsd(cfg).catch(() => ({}));
   return { e, ctx };
 }
 function pulseEntryMessage(cfg, ev, ctx) {
-  const mine = ctx.userEntries && ctx.userEntries > ev.count ? ctx.userEntries : ev.count;
-  const share = ctx.dayEntries > 0n ? Number((mine * 10000n) / ctx.dayEntries) / 100 : 100;
-  const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * mine) / ctx.dayEntries : null;
   const usd = ctx.usd || {};
   const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
-  const entered = ev.count * PULSE_ENTRY_PLS;
   const lines = [
-    `🟣⛽ *New entry on PulseChain* · ${esc(`Day ${ev.day}`)}⛽🟣`,
-    ``,
-    `🎟 *${esc(nf(ev.count))}* ${ev.count === 1n ? "entry" : "entries"} · ${esc(fmtPls(entered))}${val(entered, usd.pls)}`,
+    `🟣⛽ *${esc(nf(ev.count))} ${ev.count === 1n ? "entry" : "entries"} on PulseChain* · ${esc(`Day ${ev.day}`)}⛽🟣`,
     `⛽ *${esc(fmtTok(ev.fuelBurned))} $FUEL* burned${val(ev.fuelBurned, usd.fuel)}`
   ];
-  if (ev.toBurn) lines.push(`🔥 *${esc(fmtPls(ev.toBurn))}* to the $PAMP buy and burn${val(ev.toBurn, usd.pls)}`);
-  if (ev.toYield) lines.push(`💰 *${esc(fmtPls(ev.toYield))}* to the PLS yield${val(ev.toYield, usd.pls)}`);
-  lines.push(
-    ``,
-    `🧮 This wallet: *${esc(nf(mine))}* ${mine === 1n ? "entry" : "entries"} today · *${esc(Math.round(share))}% of the lobby*`,
-    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries`
-  );
-  if (est) lines.push(`🎁 If the day closed now: *≈ ${esc(fmtTok(est, 0))} $PAMP*${val(est, usd.pamp)}`);
-  if (ctx.secondsLeft != null) lines.push(`⏳ Day closes in *${esc(hms(ctx.secondsLeft))}*`);
-  lines.push(``, `[tx](${cfg.pulseExplorer}/tx/${ev.tx}) · [wallet](${cfg.pulseExplorer}/address/${ev.buyer}) · [dashboard](${cfg.pulseDashboard})`);
+  // compact: the two PLS legs share a line, the countdown and the link share the last
+  const pls = [ev.toBurn && `🔥 *${esc(fmtPls(ev.toBurn))}* to buy & burn`, ev.toYield && `💰 *${esc(fmtPls(ev.toYield))}* to yield`].filter(Boolean);
+  if (pls.length) lines.push(pls.join(" · "));
+  lines.push((ctx.secondsLeft != null ? `⏳ Day closes in *${esc(hms(ctx.secondsLeft))}* · ` : "") + `[dashboard](${cfg.pulseDashboard})`);
   return lines.join("\n");
 }
 function pulseRolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
@@ -211,6 +205,45 @@ function pulseRolloverMessage(cfg, closedDay, closedEntries, emission, newDay) {
     `*Day ${esc(newDay)} is open\\.* [Enter](${cfg.pulseDashboard})`
   ].join("\n");
 }
+/* $PAMP buys on PulseChain. There is no PAMP/WPLS pool yet, so every poll asks the PulseX
+   factories whether one exists (after reading the head, so a pool that appears is scanned from the
+   poll's first block and no buy in it is missed); once found it is remembered. A buy is a swap that
+   takes PAMP out of the pool, valued at the PLS paid in times the PLS price. */
+const PAIR_SWAP = new ethers.Interface(["event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)"]);
+const PAIR_SWAP_TOPIC = PAIR_SWAP.getEvent("Swap").topicHash;
+const pulsePampPairs = new Map();   // pair address -> { pampIs0 }
+async function findPulsePampPairs(cfg, ps) {
+  for (const f of cfg.pulseFactories) {
+    const fc = new ethers.Contract(f, ["function getPair(address, address) view returns (address)"], ps[0]);
+    const pair = await withRpc(ps, p => fc.connect(p).getPair(cfg.pulseToken, cfg.pulseWpls));
+    if (!pair || pair === ethers.ZeroAddress || pulsePampPairs.has(pair.toLowerCase())) continue;
+    const pc = new ethers.Contract(pair, ["function token0() view returns (address)"], ps[0]);
+    const t0 = await withRpc(ps, p => pc.connect(p).token0());
+    pulsePampPairs.set(pair.toLowerCase(), { pair, pampIs0: t0.toLowerCase() === cfg.pulseToken.toLowerCase() });
+    console.log(new Date().toISOString(), "pulse: watching PAMP/WPLS pair", pair);
+  }
+}
+function pulseBuyMessage(cfg, amount, usdValue, pair, tx) {
+  return `🟣 *${esc(fmtTok(amount))} $PAMP* bought on PulseChain${usdValue !== null ? ` ≈ ${esc(fmtUsd(usdValue))}` : ""} · [chart](https://dexscreener.com/pulsechain/${pair.toLowerCase()}) · [tx](${cfg.pulseExplorer}/tx/${tx})`;
+}
+async function pollPulseBuys(cfg, ps, from, head) {
+  await findPulsePampPairs(cfg, ps);
+  if (!pulsePampPairs.size) return;
+  const logs = await withRpc(ps, p => p.getLogs({ address: [...pulsePampPairs.values()].map(x => x.pair), topics: [PAIR_SWAP_TOPIC], fromBlock: from, toBlock: head }));
+  for (const lg of logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index)) {
+    const info = pulsePampPairs.get(lg.address.toLowerCase()); if (!info) continue;
+    const a = PAIR_SWAP.parseLog({ topics: [...lg.topics], data: lg.data }).args;
+    const pampOut = info.pampIs0 ? a.amount0Out : a.amount1Out, plsIn = info.pampIs0 ? a.amount1In : a.amount0In;
+    if (pampOut <= 0n) continue;   // a sell or an add: only buys are announced
+    const px = (await pulseUsd(cfg).catch(() => ({}))).pls;
+    const value = px ? Number(ethers.formatEther(plsIn)) * px : null;
+    // with a minimum set, a buy that cannot be priced is not announced
+    if (cfg.pulsePampBuyMinUsd > 0 && (value === null || value < cfg.pulsePampBuyMinUsd)) continue;
+    await send(cfg, pulseBuyMessage(cfg, pampOut, value, info.pair, lg.transactionHash));
+    console.log(new Date().toISOString(), "posted pulse PAMP buy", fmtTok(pampOut), value !== null ? fmtUsd(value) : "", lg.transactionHash.slice(0, 12));
+  }
+}
+
 async function pollPulse(cfg, ps, state) {
   const head = await withRpc(ps, p => p.getBlockNumber());
   const from = state.pulseLastBlock ? state.pulseLastBlock + 1 : Math.max(cfg.pulseAuctionDeployBlock, head - (cfg.pulseLookbackBlocks || 0));
@@ -223,6 +256,7 @@ async function pollPulse(cfg, ps, state) {
       await send(cfg, pulseEntryMessage(cfg, built.e, built.ctx));
       console.log(new Date().toISOString(), "posted pulse entry", short(built.e.buyer), String(built.e.count), "day", String(built.e.day));
     }
+    if (cfg.pulsePampBuys) await pollPulseBuys(cfg, ps, from, head);
     state.pulseLastBlock = head;
   }
   const c = new ethers.Contract(cfg.pulseAuction, PULSE_ABI, ps[0]);
@@ -293,26 +327,15 @@ const hms = secs => { secs = Math.max(0, secs); const h = Math.floor(secs / 3600
 function entryMessage(cfg, ev, ctx) {
   const shown = Number(ev.day) - cfg.dayOffset;
   const dayLabel = shown >= 1 ? `Day ${shown}` : "Pre\\-launch day";
-  const mine = ctx.userEntries && ctx.userEntries > ev.count ? ctx.userEntries : ev.count;   // the wallet's whole day
-  const share = ctx.dayEntries > 0n ? Number((mine * 10000n) / ctx.dayEntries) / 100 : 100;
-  const est = ctx.dayEntries > 0n && ctx.emission ? (ctx.emission * mine) / ctx.dayEntries : null;
   const usd = ctx.usd || {};
   const val = (wei, px) => px ? ` ≈ ${esc(fmtUsd(Number(ethers.formatEther(wei)) * px))}` : "";
-  // every entry is worth 0.0001 ETH: what was sent plus the $FUEL it took
-  const entered = ev.count * 10n ** 14n;
+  // compact, like the PulseChain one: the count in the title, what burned, the countdown with the links
   const lines = [
-    `🟢⛽ *New entry* · ${esc(dayLabel)}⛽🟢`,
-    ``,
-    `🎟 *${esc(nf(ev.count))}* ${ev.count === 1n ? "entry" : "entries"} · ${esc(fmtEth(entered))}${val(entered, usd.eth)}`,
+    `🟢⛽ *${esc(nf(ev.count))} ${ev.count === 1n ? "entry" : "entries"} on Robinhood* · ${esc(dayLabel)}⛽🟢`,
     `⛽ *${esc(fmtTok(ev.fuelBurned))} $FUEL* burned${val(ev.fuelBurned, usd.fuel)}`,
     `🟢 *${esc(fmtTok(ev.moreBurned ?? 0n))} $MORE* burned${val(ev.moreBurned ?? 0n, usd.more)}`,
-    ``,
-    `🧮 This wallet: *${esc(nf(mine))}* ${mine === 1n ? "entry" : "entries"} this cycle · *${esc(Math.round(share))}% of the lobby*`,
-    `📊 Day so far: *${esc(nf(ctx.dayEntries))}* entries`,
+    (ctx.secondsLeft != null ? `⏳ Day closes in *${esc(hms(ctx.secondsLeft))}* · ` : "") + `[dashboard](${cfg.dashboard}) · [chart](${cfg.dexscreener})`
   ];
-  if (est) lines.push(`🎁 If the day closed now: *≈ ${esc(fmtTok(est, 0))} $PAMP*${val(est, usd.pamp)}`);
-  if (ctx.secondsLeft != null) lines.push(`⏳ Day closes in *${esc(hms(ctx.secondsLeft))}*`);
-  lines.push(``, `[tx](${cfg.explorer}/tx/${ev.tx}) · [wallet](${cfg.explorer}/address/${ev.buyer}) · [dashboard](${cfg.dashboard}) · [chart](${cfg.dexscreener})`);
   return lines.join("\n");
 }
 async function entryPrices(cfg) {

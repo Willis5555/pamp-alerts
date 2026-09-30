@@ -90,6 +90,9 @@ A Task Scheduler job called **"PAMP entry alerts"** also exists on this machine 
 | `pulseDashboard` | https://pulsepamp.github.io/369/ | the dashboard link in PulseChain messages |
 | `pulseMinEntries` | 1 | ignore PulseChain transactions with fewer entries than this |
 | `pulseLookbackBlocks` | 2000 | with no saved PulseChain position, scan this far back (~5.5 hours) |
+| `pulsePampBuys` | true | also post "🟣 12,345 $PAMP bought on PulseChain ≈ $12.34 · chart · tx" for every buy on a PAMP/WPLS pool on PulseX V2 or V1. The pool does not exist yet: the bot asks both factories each poll and starts watching the moment one appears |
+| `pulsePampBuyMinUsd` | 10 | only announce PulseChain $PAMP buys worth at least this many dollars (PLS paid × the PLS price) |
+| `pulseFactories` / `pulseWpls` | PulseX V2 + V1 / WPLS | where the PAMP/WPLS pool is looked for |
 
 `node entry-alerts.js --test-last-pulse` posts the most recent PulseChain entry to the group
 (add `--dry-run` to print it instead).
